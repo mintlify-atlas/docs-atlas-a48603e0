@@ -1,0 +1,86 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "NanoJev",
+  "projectDescription": "A 0.6B parallel decision model built on Qwen3-0.6B that produces complete probability distributions over structured choices, booleans, and scored levels in a single forward pass — no output-token decoding required.",
+  "theme": "luma",
+  "primaryColor": "#6078a3",
+  "lightColor": "#eff4ea",
+  "darkColor": "#0c0c0c",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/decision-model",
+              "concepts/question-types",
+              "concepts/parallel-decisions"
+            ]
+          },
+          {
+            "group": "Training Pipeline",
+            "pages": [
+              "pipeline/overview",
+              "pipeline/dataset-format",
+              "pipeline/training",
+              "pipeline/evaluation"
+            ]
+          },
+          {
+            "group": "Serving & Inference",
+            "pages": [
+              "serving/local-service",
+              "serving/inference-api",
+              "serving/game-replay"
+            ]
+          },
+          {
+            "group": "Experiments & Results",
+            "pages": [
+              "experiments/game-benchmarks",
+              "experiments/rlcd",
+              "experiments/model-checkpoints"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Zero output-token decoding — decisions read directly from a single forward pass",
+    "Parallel batching of multiple independent states and questions in one inference call",
+    "Dynamic candidate sets of 2–255 options per Choice question",
+    "Three question primitives: Choice (multi-candidate), Boolean (true/false), and Score (ordered levels)",
+    "Complete probability distributions for ranking, greedy selection, or sampling",
+    "End-to-end training pipeline from programmatic dataset generation to checkpoint evaluation",
+    "Persistent HTTP decision service with POST /api/evaluate endpoint",
+    "RLCD-inspired calibrated probability learning with CE, Brier, and paired proper-reward objectives",
+    "Interactive browser-based game replay for maze and Snake trajectories",
+    "Qwen3-0.6B backbone with task-specific decision heads (scalar shared head + set attention for Choice)"
+  ],
+  "publicApiSurface": [
+    "POST /api/evaluate — batched decision inference endpoint",
+    "GET /api/health — service health check",
+    "scripts/serve_decisions.py — persistent model server",
+    "scripts/predict_toy_decisions.py — CLI batch inference",
+    "scripts/train_pipeline_decisions.py — training script",
+    "scripts/build_toy_decisions.py — programmatic dataset generation",
+    "scripts/build_game_decisions.py — game environment dataset generation",
+    "scripts/evaluate_pipeline_decisions.py — metrics evaluation by split and question type",
+    "scripts/evaluate_navigation_v3.py — closed-loop navigation benchmark",
+    "scripts/build_navigation_v3.py — navigation dataset generation",
+    "Question types: choice, boolean, score",
+    "Training record fields: state, questions, gold_probs, gold_probs_kind, split",
+    "gold_probs_kind values: deterministic_truth, programmatic_conditional_distribution, optimal_action_policy"
+  ]
+}

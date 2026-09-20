@@ -1,0 +1,153 @@
+---
+title: "Batching Independent Decisions in One Forward Pass"
+sidebarTitle: "Parallel Decisions"
+description: "NanoJev batches multiple states and questions into a single backbone forward. Understand the batching model, independence guarantees, and request limits."
+---
+
+NanoJev's defining property is that every question in a batch — regardless of how many states, question types, or candidate sets it spans — is evaluated in a single backbone forward pass. The model is loaded once and reused; there is no per-question model reload, no sequential generation loop, and no latency penalty for asking more questions in the same request. Understanding how batching works, what its independence guarantees mean, and where its limits are lets you design requests that make full use of the parallel decision architecture.
+
+## Batching Model
+
+A single request to NanoJev packages one or more states, each with its own question map, into a `states` array. When the predictor receives the request it:
+
+1. Iterates over every state and every question to build a flat list of **candidate paths** — independent leaf token sequences, one per candidate.
+2. Pads all paths in the batch to the same length.
+3. Runs the entire padded batch through the Qwen3-0.6B backbone in **one matrix multiplication**.
+4. Reads the hidden state at the final token position of each leaf and passes it through the appropriate decision head.
+5. Groups results back by state ID and question ID and returns the full response.
+
+A measured example from a running production service:
+
+> **6 states · 18 questions · 44 candidate paths · 1 backbone forward**
+
+All 18 questions across 6 different states were answered from a single backbone forward. The 44 candidate paths represent the sum of all candidates across those 18 questions — Boolean contributing 1 each, Choice contributing one per option, Score contributing one per level.
+
+## Independence Guarantees
+
+Questions within a batch are **structurally independent**. Each candidate path contains exactly one state, one instruction, and its own candidate text. No cross-question attention occurs during the forward pass — a question's candidate tokens are never visible to another question's candidate tokens, even when both questions share the same state string.
+
+This has a practical consequence: adding an unrelated question to a batch does not change the probability scores for existing questions. A Boolean question about occupancy cannot shift the logits of a Choice question about temperature actions, even when both are evaluated against the same state. The decision isolation is guaranteed by the input structure, not by any post-processing filter.
+
+If a later question must incorporate the answer to an earlier one, that answer must be added to the state text of a new, separate request. NanoJev does not chain answers within a single batch.
+
+## Candidate Path Counting
+
+The total number of candidate paths in a batch determines the batch size sent to the backbone. Calculate it as follows:
+
+| Question type | Candidate paths contributed |
+|---|---|
+| `boolean` | 1 (always, regardless of criteria) |
+| `choice` | N (one per entry in `criteria`) |
+| `score` | K (one per entry in `criteria` array) |
+
+**Example mixed-batch calculation:**
+
+```
+State A:
+  question_1 (boolean)           →  1 path
+  question_2 (choice, 4 options) →  4 paths
+  question_3 (score, 3 levels)   →  3 paths
+
+State B:
+  question_4 (boolean)           →  1 path
+  question_5 (choice, 5 options) →  5 paths
+
+Total: 1 + 4 + 3 + 1 + 5 = 14 candidate paths → 1 backbone forward
+```
+
+All 14 paths are padded to the length of the longest path and processed together in one matrix multiplication.
+
+## Service Limits
+
+The persistent service (`serve_decisions.py`) enforces hard limits per request:
+
+| Resource | Maximum |
+|---|---|
+| States | 32 |
+| Questions | 96 |
+| Candidate paths | 256 |
+
+Boolean questions always contribute 1 path. Choice and Score questions contribute one path per candidate or level. A request with 96 questions where every question is a 3-option Choice would produce 288 candidate paths — exceeding the 256 limit. Plan candidate counts accordingly when constructing large batches.
+
+## CLI Batching
+
+The `predict_toy_decisions.py` script controls how candidate paths are grouped for inference with the `--batch-questions` flag:
+
+- `--batch-questions 0` *(default)* — Evaluates all questions in the request in **one forward pass**. This is the fully parallel mode.
+- `--batch-questions N` *(positive integer)* — Groups complete questions into batches of at most N questions and runs each group as a separate forward pass.
+
+For large requests, `--max-microbatch-tokens` sets a padded-token limit per microbatch during training. Increase this value when a single question's candidate paths require more space than the default allows:
+
+```bash
+python scripts/predict_toy_decisions.py \
+  --checkpoint-dir checkpoints/NanoJev \
+  --input data/request.json \
+  --output artifacts/decisions.json \
+  --batch-questions 0 \
+  --max-microbatch-tokens 6000 \
+  --precision bf16
+```
+
+## Practical Guidance
+
+**For lowest latency on a single request:** Use `--batch-questions 0`. All questions go into one forward pass, and the backbone runs exactly once. This is the default and is appropriate for interactive or real-time applications.
+
+**For large datasets with memory constraints:** Use a positive `--batch-questions` value to process questions in smaller groups. Each group runs as an independent forward pass, keeping peak GPU memory proportional to the group size rather than the full request size.
+
+**For throughput across many independent requests:** Send each request with as many states and questions as possible, up to the service limits. The persistent service loads the model once and reuses it across all requests; batching at the request level amortizes model-loading cost to zero.
+
+## Example: Two States with Mixed Questions
+
+```json
+{
+  "states": [
+    {
+      "id": "living_room",
+      "state": "The living room is 29 degrees. The target is 24 degrees. The window is closed and someone is home.",
+      "questions": {
+        "action": {
+          "type": "choice",
+          "instructions": "Choose the action that most directly lowers the room temperature.",
+          "criteria": {
+            "cool": "Turn on air conditioning",
+            "light": "Turn on the lights",
+            "wait": "Keep the current settings"
+          }
+        },
+        "occupied": {
+          "type": "boolean",
+          "instructions": "Someone is home."
+        }
+      }
+    },
+    {
+      "id": "bag_draw",
+      "state": "A token is drawn uniformly from a bag containing three red tokens and one blue token. The draw has not been observed.",
+      "questions": {
+        "color": {
+          "type": "choice",
+          "instructions": "What is the probability distribution of the drawn token's color?",
+          "criteria": {
+            "red": "The token is red",
+            "blue": "The token is blue"
+          }
+        },
+        "is_red": {
+          "type": "boolean",
+          "instructions": "The drawn token is red."
+        }
+      }
+    }
+  ]
+}
+```
+
+This request has 2 states, 4 questions, and 7 candidate paths (3 + 1 + 2 + 1). It requires 1 backbone forward. The `living_room` questions and the `bag_draw` questions share no state and do not influence each other's scores.
+
+<Warning>
+  Candidate sets may differ freely between questions: a Choice question can have 10 options while another in the same batch has 2. Boolean questions, however, always contribute **exactly 1 candidate path** regardless of how many Boolean questions are in the request. A request with 50 Boolean questions contributes 50 total candidate paths from those questions alone — one per question, not one total.
+</Warning>
+
+<Note>
+  The `--batch-questions` flag has a different meaning during **training** than during inference. During training, a positive value groups complete questions for gradient accumulation — multiple microbatches are accumulated before a single optimizer update. During inference, the same flag simply controls how many questions are grouped into each backbone forward pass, with no gradient or optimizer behavior involved.
+</Note>

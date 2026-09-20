@@ -1,0 +1,155 @@
+---
+title: "RLCD: Calibrated Probability Learning for Decision Models"
+sidebarTitle: "RLCD"
+description: "NanoJev implements an RLCD-inspired paired proper-reward objective and compares it with direct cross-entropy and Brier score controls on event probability calibration."
+---
+
+This page documents NanoJev's implementation of RLCD-inspired calibrated probability learning and its measured results. The experiment trains three arms on observed game events, compares their probability recovery against simulator ground truth, and reports both CPU verification results and full Qwen3-0.6B training outcomes.
+
+## What is RLCD?
+
+TypeSafe expands RLCD as **Reinforcement Learning for Calibrated Decisions** and describes a system where decisions carry full probability distributions rather than generated text. TypeSafe's checked public materials do not disclose a reproducible reward formula, optimizer configuration, or training implementation.
+
+NanoJev's paired proper-reward formula below is an **independent research candidate**, not a recovered official recipe. It is derived from proper-scoring theory and independently verified through gradient checks.
+
+## The paired proper-reward objective
+
+For visible input `x`, let `Y ~ q(.|x)` be an observed outcome and `p = softmax(logits)` cover the complete candidate set. Draw `M >= 2` independent predictions with replacement, `A_i ~ p`, and let `c[k]` count occurrences of candidate `k`.
+
+```text
+R = (2/M) sum_i 1[A_i=Y] - sum_k c[k](c[k]-1)/(M(M-1))
+E[R | x] = 2 p.q - ||p||^2 = ||q||^2 - ||p-q||^2
+```
+
+The per-sample reward and baseline are:
+
+```text
+r_i = (2/M) 1[A_i=Y] - 2(c[A_i]-1)/(M(M-1))
+b_i = (2/M) p[Y] - 2 sum_{j!=i} p[A_j]/(M(M-1))
+```
+
+The policy-gradient loss and its expected gradient are:
+
+```text
+L_PG = -sum_i stop_gradient(r_i - b_i) log p[A_i]
+E[grad L_PG | x] = grad ||p-q||^2
+```
+
+The other samples and `Y` are fixed when taking the conditional expectation over `A_i`. The detached baseline must not depend on `A_i` itself. All sample-dependent reward terms must be included. A zero baseline is also valid. The scalar surrogate is not a reported Brier score, and its mean need not numerically equal the direct loss.
+
+## Necessary conditions
+
+The argument holds only when specific independence conditions are met:
+
+- **Y must be independent of the predictive draws** conditional on `x`. The predictions are possible labels of the same event, not physical actions that change that event's outcome.
+- **Correlated draws break the argument.** Self-pairs in the agreement penalty, or differentiating through the baseline, violate the conditional expectation used to derive `E[grad L_PG | x] = grad ||p-q||²`.
+- **Correctness-only REINFORCE is linear in `p`** and favors a single winning class instead of recovering `q`. It is not a proper calibration objective.
+
+## Three training objectives
+
+All three objectives share the same population optimum — recovering `q` — and the same observed outcome `Y` as the training signal. Exact probabilities serve only as evaluation references.
+
+| Objective | Formula |
+|---|---|
+| Observed CE | `-log p[Y]` |
+| Direct Brier | `sum_k (p[k] - 1[Y=k])^2` |
+| Paired proper-reward PG | Sampled policy-gradient estimator of the expected Brier `||p-q||^2` |
+
+The paired method is a stochastic gradient estimator of the same expected Brier objective as direct Brier. This follows from [proper-scoring theory](https://sites.stat.washington.edu/people/raftery/Research/PDF/Gneiting2007jasa.pdf), not an unpublished TypeSafe algorithm.
+
+## CPU verification results
+
+A small shared-candidate MLP is trained with non-degenerate known `q` and dynamic `K=2/3/5`. Fixed train/dev/test sizes are 1,536/768/2,048. Seeds 17/18/19 share the same data; within each seed, every arm shares initialization and the batch schedule. Each arm completes 600 Adam updates, batch 32, learning rate 0.003; sampled arms use `M=32`.
+
+| CPU arm | Test known-q squared L2, mean ± sample SD |
+|---|---:|
+| Initial random scorer | 0.038371 ± 0.005178 |
+| Observed CE | 0.002581 ± 0.000516 |
+| Direct Brier | 0.003279 ± 0.000530 |
+| Paired proper-reward PG | 0.003377 ± 0.000908 |
+| Correctness-only REINFORCE | 0.017131 ± 0.013953 |
+
+All CPU arms select the minimum observed dev NLL — including step zero — before one test evaluation. Correctness-only REINFORCE selected steps 50/0/50; its final-step dev NLL rose to 3.146/2.814/3.162, so early stopping limits the damage visible in its test row. Seed SD conditions on one dataset and is not a confidence interval over new tasks.
+
+## Qwen event experiment results
+
+The three arms start from the same existing NanoJev checkpoint (`v3_teacher_coords_multi_seed17`), built on Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`. **"Initial NanoJev"** in the table below is this checkpoint before event training — not an untouched language model.
+
+All arms use seed 17, 100 full-model steps, effective batch 16, BF16 forward, and an 8,192-token limit with complete inputs. AdamW uses backbone/head learning rates 2e-5/2e-4, weight decay 0.01, and gradient-norm clipping at 1.0.
+
+The frozen simulator inputs specify maze or Snake geometry with a noisy actuator: the intended action occurs with reliability `ρ`, and alternatives split the remaining mass. The target event is one-step collision-free movement. Exact `q` follows from simulator transitions; a separately seeded actuator draw supplies the observed `Y`. Only observed outcomes enter training. Frozen split counts are train **1,124**, dev **372**, calibration **368**, test **364**, and OOD **128** questions. Size 50 is the OOD split.
+
+Results below are from `results/scaled_probability_summary.json`. Lower is better for all three metrics. Each cell contains **NLL / vector Brier / known-q squared L2**.
+
+| Qwen arm | Test (364 questions) | OOD (128 questions) |
+|---|---:|---:|
+| Initial NanoJev | 0.639286 / 0.446492 / 0.277078 | 0.679861 / 0.486668 / 0.319949 |
+| Observed CE | 0.460450 / 0.299032 / 0.124226 | 0.332381 / 0.229906 / 0.072497 |
+| Direct Brier | 0.450525 / 0.303270 / 0.138445 | 0.316682 / 0.208351 / 0.067186 |
+| Paired proper-reward PG | 0.427911 / 0.278123 / 0.118444 | 0.329677 / 0.201326 / 0.062022 |
+
+All three trained checkpoints were selected at step 100 by minimum observed dev NLL among steps 50/100. Test outcomes did not select checkpoints or remove examples. Vector Brier is twice scalar Bernoulli Brier. Boolean ECE uses ten fixed bins of `p(true)` against finite-sample observed frequencies.
+
+## Reproduction commands
+
+Run from the repository root. Mathematical and MLP checks run on CPU; the Qwen stage requires CUDA and the packages in `requirements-toy.txt`. The five frozen files under `data/scaled_games_v4/events/` must match each run's `config.json:data_sha256` and the dataset manifest.
+
+```bash
+# Step 1: Verify the gradient implementation
+python scripts/test_calibrated_objectives.py \
+  --mc-repeats 2000 \
+  --output results/calibrated_objectives_check.json
+
+# Step 2: Run the CPU MLP benchmark across three seeds
+python scripts/benchmark_calibrated_learning.py \
+  --steps 600 --seeds 17 18 19 \
+  --output results/calibrated_learning_benchmark.json
+
+# Step 3: Validate the frozen event data
+python scripts/train_pipeline_decisions.py \
+  --input data/scaled_games_v4/events --validate-only
+
+# Step 4: Evaluate the initial checkpoint before event training
+export NANOJEV_EVENT_INIT=/path/to/v3_teacher_coords_multi_seed17
+python scripts/evaluate_game_questions.py \
+  --input data/scaled_games_v4/events \
+  --checkpoint "$NANOJEV_EVENT_INIT" \
+  --output-dir runs_repro/events_initial \
+  --max-length 8192
+
+# Step 5: Train all three arms
+for objective in ce brier paired_brier_pg; do
+  run_name="events_${objective}_seed17"
+  if [ "$objective" = paired_brier_pg ]; then run_name=events_paired_seed17; fi
+  python scripts/train_pipeline_decisions.py \
+    --input data/scaled_games_v4/events \
+    --output-dir "runs_repro/$run_name" \
+    --init-checkpoint "$NANOJEV_EVENT_INIT" \
+    --objective observed_outcome --loss "$objective" \
+    --reward-samples 32 \
+    --steps 100 --head-steps 0 \
+    --batch-questions 16 --microbatch-questions 4 \
+    --max-microbatch-tokens 16384 --eval-every 50 \
+    --max-length 8192 --seed 17 \
+    --backbone-lr 2e-5 --head-lr 2e-4 \
+    --precision bf16 \
+    --gradient-checkpointing --disable-native-triton
+done
+
+# Step 6: Summarize results
+python scripts/summarize_scaled_results.py --self-check
+python scripts/summarize_scaled_results.py \
+  --runs-dir runs_repro \
+  --initial-run events_initial \
+  --output results/scaled_probability_summary_reproduced.json
+```
+
+Use fresh run directories for each experiment. Replace the checkpoint path with the complete recorded checkpoint package; see [Model Checkpoints](/experiments/model-checkpoints) for download instructions.
+
+<Warning>
+One seed and a narrow event family — maze and Snake geometry with a noisy actuator — cannot establish a general ranking among the three objectives. The paired proper-reward arm shows lower L2 error in this one run, but direct Brier achieves lower OOD NLL. Reported seed SD conditions on one dataset and is not a confidence interval over new tasks or event families.
+</Warning>
+
+<Note>
+The unbiased-estimator proof describes the raw policy-gradient direction, not the nonlinear AdamW optimizer or gradient-norm clipping operations used in practice. The scalar surrogate mean need not numerically equal the direct Brier loss, and its value is not reported as a Brier score.
+</Note>

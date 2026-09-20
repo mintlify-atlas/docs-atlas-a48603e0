@@ -1,47 +1,211 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with NanoJev in Minutes"
+sidebarTitle: "Quickstart"
+description: "Download the NanoJev model from HuggingFace, start the local decision service, and send your first batched inference request in under 10 minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through everything you need to run NanoJev locally: install the Python dependencies, download the model checkpoint from HuggingFace, start the persistent decision service, and send your first batched inference request. By the end you will have a running local endpoint that accepts states and questions and returns complete probability distributions in a single forward pass.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+  NanoJev requires a CUDA-capable NVIDIA GPU for model inference. Development and benchmarking were performed on an A100 80 GB. A GPU with less VRAM may work at reduced batch sizes, but is not officially tested.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Install Python dependencies">
+    Clone the repository and install the exact package versions used during development. NanoJev requires **Python 3.11 or newer**.
 
     ```bash
-    npm install your-package
+    git clone https://github.com/TianyuCodings/NanoJev.git
+    cd NanoJev
+    python3 -m venv .venv
+    source .venv/bin/activate
+    python -m pip install -r requirements-toy.txt
     ```
+
+    The `requirements-toy.txt` file pins the following versions, recorded from the development environment (Python 3.14.4 / A100 80 GB):
+
+    | Package | Version |
+    |---|---|
+    | `torch` | 2.14.0 |
+    | `transformers` | 5.17.0 |
+    | `safetensors` | 0.8.0 |
+    | `numpy` | 2.5.3 |
+
+    The data generators and schema validation use the Python standard library only — no additional API keys or model-service accounts are required.
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Download the model checkpoint">
+    Download the base release checkpoint from HuggingFace into a local directory. The patterns below fetch only the files needed to run the service: the weights, model config, tokenizer, and backbone configuration.
+
+    ```python
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id="C-Tianyu/NanoJev",
+        local_dir="checkpoints/NanoJev",
+        allow_patterns=[
+            "best.safetensors",
+            "config.json",
+            "tokenizer/*",
+            "backbone_config/*",
+        ],
+    )
+    snapshot_download(
+        repo_id="C-Tianyu/NanoJev-Data",
+        repo_type="dataset",
+        local_dir="data/NanoJev",
+    )
+    ```
+
+    To download one of the game-specific showcase variants instead, use the `variants/` prefix. Choose the variant that matches your use case:
+
+    <CodeGroup>
+
+    ```python Maze Demo (50×50)
+    from pathlib import Path
+    from huggingface_hub import snapshot_download
+
+    variant = "local_atomic_seed17"  # 50×50 maze showcase
+    snapshot = snapshot_download(
+        repo_id="C-Tianyu/NanoJev",
+        allow_patterns=[f"variants/{variant}/*"],
+    )
+    checkpoint_dir = Path(snapshot) / "variants" / variant
+    ```
+
+    ```python Snake Demo (12×12)
+    from pathlib import Path
+    from huggingface_hub import snapshot_download
+
+    variant = "games_gold_seed17"  # Snake showcase
+    snapshot = snapshot_download(
+        repo_id="C-Tianyu/NanoJev",
+        allow_patterns=[f"variants/{variant}/*"],
+    )
+    checkpoint_dir = Path(snapshot) / "variants" / variant
+    ```
+
+    </CodeGroup>
+
+    After downloading, your `checkpoints/NanoJev/` directory will contain `best.safetensors`, `config.json`, `tokenizer/`, and `backbone_config/`.
+  </Step>
+
+  <Step title="Start the persistent service">
+    Load the checkpoint once and start the local HTTP service. The model is held in memory and reused across all subsequent requests — there are no provider calls.
 
     ```bash
-    your-cli init
+    CUDA_VISIBLE_DEVICES=0 python scripts/serve_decisions.py \
+      --checkpoint-dir checkpoints/NanoJev \
+      --web-root web \
+      --port 8765
     ```
+
+    When the service is ready you will see a JSON startup message:
+
+    ```json
+    {"url": "http://127.0.0.1:8765", "ready": true, "provider_calls": 0}
+    ```
+
+    The service accepts up to **32 states**, **96 questions**, and **256 candidate paths** per request. Boolean questions consume one path each; Choice and Score consume one path per candidate or level.
+
+    Additional options:
+
+    | Flag | Default | Description |
+    |---|---|---|
+    | `--host` | `127.0.0.1` | Interface to bind |
+    | `--port` | `8765` | TCP port |
+    | `--precision` | `bf16` | `bf16` or `fp32` |
+    | `--disable-native-triton` | off | Enable only for PyTorch native-Triton compatibility fallback |
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Send your first inference request">
+    With the service running, open a second terminal in the repository root. First confirm the service is healthy, then send a batched decision request.
+
+    **Health check:**
 
     ```bash
-    your-cli start
+    curl http://127.0.0.1:8765/api/health
     ```
+
+    Expected response:
+
+    ```json
+    {"ready": true, "model_loaded_once": true, "provider_calls": 0}
+    ```
+
+    **Send a decision request:**
+
+    Save the following payload to `data/request.json`. It contains one state with three independent questions — a Choice, a Boolean, and a Score — all evaluated in a single forward pass:
+
+    ```json
+    {
+      "states": [{
+        "id": "living_room",
+        "state": "The living room is 29 degrees. The target is 24 degrees. The window is closed and someone is home.",
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Choose the action that most directly lowers the room temperature.",
+            "criteria": {
+              "cool": "Turn on air conditioning",
+              "light": "Turn on the lights",
+              "wait": "Keep the current settings"
+            }
+          },
+          "occupied": {
+            "type": "boolean",
+            "instructions": "Someone is home."
+          },
+          "heat": {
+            "type": "score",
+            "instructions": "Classify how far the room temperature exceeds the target.",
+            "criteria": [
+              "At or below target",
+              "Above target by at most 3 degrees",
+              "Above target by more than 3 degrees"
+            ]
+          }
+        }
+      }]
+    }
+    ```
+
+    ```bash
+    curl http://127.0.0.1:8765/api/evaluate \
+      -H 'Content-Type: application/json' \
+      --data-binary @data/request.json
+    ```
+
+    The response contains per-question probability distributions and execution counters for every question in the batch. Add more objects to `states` to evaluate multiple independent situations in the same forward pass.
   </Step>
+
+  <Step title="Open the browser demo">
+    Navigate to the web interface served by the running service to inspect decisions interactively:
+
+    ```
+    http://127.0.0.1:8765
+    ```
+
+    The interface lets you compose requests, inspect distributions, and step through recorded game trajectories directly in the browser.
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Decision arcade (no GPU required)
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+The interactive maze and Snake replay runs entirely from pre-recorded data — no model or CUDA environment needed. Open a terminal in the repository root and start Python's built-in HTTP server:
+
+```bash
+python -m http.server 8080 --bind 127.0.0.1 --directory web
+```
+
+<Tip>
+  Open **http://127.0.0.1:8080/arcade.html** to play through the maze and Snake recordings, inspect the model's action probabilities at each step, and replay the complete recorded trajectories. The earlier 40-map navigation benchmark viewer is at **http://127.0.0.1:8080/comparison.html**.
 </Tip>
+
+## Next steps
+
+- Read the [Installation guide](/installation) for full environment setup, checkpoint variants, and dataset verification.
+- Browse the [pipeline runbook](https://github.com/TianyuCodings/NanoJev/blob/main/research/pipeline_runbook.md) for data generation, training, and evaluation commands.
+- Explore the six checkpoint variants — from calibrated-decision experiments to full-map game comparisons — in the [model repository](https://huggingface.co/C-Tianyu/NanoJev).

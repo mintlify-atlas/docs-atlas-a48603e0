@@ -1,0 +1,117 @@
+---
+title: "Interactive Game Replay and Decision Arcade"
+sidebarTitle: "Game Replay"
+description: "Explore NanoJev decisions in the browser using the interactive arcade — replay maze and Snake trajectories, inspect probability distributions, and step through actions."
+---
+
+The NanoJev repository includes a browser-based arcade that replays pre-recorded trajectories from NanoJev, Jev, and untuned Qwen3-0.6B across both the 50×50 maze and the 12×12 Snake game. Every step is stored in JSON and rendered entirely in the browser — no model, no GPU, and no framework required. The viewer exposes actual actions, probability distributions at each step, greedy versus sampled controller comparisons, and complete trajectory outcomes.
+
+## Quick start (recorded demos)
+
+The simplest path is to serve the `web/` directory with Python's built-in HTTP server and open the arcade directly:
+
+```bash
+python -m http.server 8080 --bind 127.0.0.1 --directory web
+```
+
+Then open **http://127.0.0.1:8080/arcade.html** in a browser.
+
+The page reads `arcade_results.json` from the same directory. No model calls are made.
+
+<Note>
+  The replay runs entirely in the browser from pre-recorded JSON files. No live model, GPU, or network access is needed to view the recorded demonstrations.
+</Note>
+
+## Available demos
+
+All pages are served from the same `web/` directory.
+
+| Page | URL | Contents |
+|---|---|---|
+| `arcade.html` | `http://127.0.0.1:8080/arcade.html` | Decision arcade: 50×50 maze and 12×12 Snake recorded trajectories for NanoJev, Jev, and Starting NanoJev/Untuned Qwen |
+| `comparison.html` | `http://127.0.0.1:8080/comparison.html` | Earlier 40-map navigation benchmark viewer comparing NanoJev, Jev, and Untuned Qwen |
+| `side-by-side.html` | `http://127.0.0.1:8080/side-by-side.html` | Light three-panel side-by-side trajectory comparison |
+
+### Arcade highlights
+
+- **50×50 maze:** NanoJev reaches the goal in 244 attempts with 36 collisions. Jev uses 2,738 attempts with 1,044 collisions. Starting NanoJev uses 171 attempts with 43 collisions.
+- **12×12 Snake (seed 61005, greedy controller):** NanoJev collects 27 food in 256 steps; Jev collects 30; Untuned Qwen collects 25 before becoming trapped at step 211.
+
+<Tip>
+  Use `comparison.html` to compare NanoJev vs Jev vs Untuned Qwen on the original 40-map navigation benchmark — 20 test maps (4×4) and 20 OOD maps (6×6) using T=1 probability sampling.
+</Tip>
+
+## Attach to a live service
+
+To use the interactive decision lab with a live model (instead of pre-recorded JSON), start `serve_decisions.py` and open its root URL:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/serve_decisions.py \
+  --checkpoint-dir runs/navigation_run \
+  --web-root web --host 127.0.0.1 --port 8765 \
+  --precision bf16
+```
+
+Then open **http://127.0.0.1:8765**. The live form on the decision lab page posts its JSON to `POST /api/evaluate` at the same origin. The interface shows the actual model response and browser round-trip duration. API credentials are never embedded in the page.
+
+See [Run the NanoJev Local Decision Service](/serving/local-service) for full service configuration details.
+
+## Build your own replay
+
+To assemble a replay from a freshly trained model and navigation runs, follow these steps from the pipeline runbook.
+
+**Step 1 — Run the navigation evaluator** to generate trajectory files for both the greedy and sampled controllers:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate_navigation_v3.py \
+  --data-dir data/navigation \
+  --checkpoint-dir runs/navigation_run \
+  --policy greedy --representation coords --precision bf16 \
+  --seed 20260917 --per-split 20 \
+  --name navigation_run_greedy \
+  --output artifacts/navigation_run/greedy.json
+
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate_navigation_v3.py \
+  --data-dir data/navigation \
+  --checkpoint-dir runs/navigation_run \
+  --policy sample --representation coords --precision bf16 \
+  --seed 20260917 --per-split 20 \
+  --name navigation_run_sample \
+  --output artifacts/navigation_run/sample.json
+```
+
+**Step 2 — Build the demo artifact** by combining the two trajectory files into a single replay data file:
+
+```bash
+python scripts/build_demo_artifact.py \
+  --models artifacts/navigation_run/greedy.json \
+           artifacts/navigation_run/sample.json \
+  --output artifacts/navigation_run/demo_results.json
+```
+
+**Step 3 — Install web files and the replay data** into a self-contained artifact directory:
+
+```bash
+cp -R web artifacts/navigation_run/web
+cp artifacts/navigation_run/demo_results.json \
+   artifacts/navigation_run/web/demo_results.json
+```
+
+**Step 4 — Serve the artifact directory** and open the viewer:
+
+```bash
+python -m http.server 8081 --bind 127.0.0.1 \
+  --directory artifacts/navigation_run/web
+```
+
+Open **http://127.0.0.1:8081** to inspect your completed runs and their recorded action distributions.
+
+## What you can inspect
+
+The viewer exposes the full detail of every recorded trajectory:
+
+- **Actual actions and probabilities per step** — the action that was executed, including when it differs from the argmax of the probability distribution (sampled controller).
+- **Greedy vs sampled controller comparison** — both controllers are recorded and selectable from the model tabs.
+- **Full trajectory step-through** — step forward, step backward, or use continuous playback through the complete episode.
+- **Collision and outcome data** — total attempts, collision counts, and the recorded final outcome (goal reached, step limit, trapped).
+- **Parallel batch execution metadata** — forward passes, total candidate paths, and per-step model call details.

@@ -1,0 +1,111 @@
+---
+title: "NanoJev: Parallel Decisions with Complete Probability Distributions"
+sidebarTitle: "Introduction"
+description: "NanoJev is a 0.6B decision model that replaces autoregressive generation with structured decision heads, returning full probability distributions in a single forward pass."
+---
+
+NanoJev is a 0.6B parallel decision model built on Qwen3-0.6B — a nano replica of [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) by TypeSafe. Where standard language models generate output tokens one at a time, NanoJev replaces that entire decoding loop with structured **decision heads** attached to the backbone. You provide a state description and a set of questions; the model returns a complete probability distribution over every candidate in a single forward pass — no sampling, no beam search, no token-by-token decoding.
+
+## The core concept
+
+Every decision in NanoJev is defined by three things: a **state** (a natural-language description of the current situation), a **question** (what you want to decide), and a **candidate set** (the choices available for that question). Multiple independent states and questions can be batched into a single forward pass. The backbone encodes all candidate paths in parallel, and shared decision heads return a normalized probability distribution over every candidate simultaneously.
+
+This design eliminates the output-token decoding step entirely. There is no autoregressive loop, no next-token sampling, and no post-processing of generated text. The decision is the output — available as a full distribution you can use for greedy selection, probability-weighted sampling, or direct ranking.
+
+<Tip>
+  In a running service, NanoJev evaluates **6 states · 18 questions · 44 candidate paths** using only **1 backbone forward**.
+</Tip>
+
+## Performance benchmarks
+
+NanoJev has been evaluated head-to-head against Jev (TypeSafe) and an untuned Qwen3-0.6B baseline on two game environments.
+
+### 50×50 maze navigation
+
+The model judges four local directions. Shared code remembers collisions, explores untried edges, and repositions through verified open paths.
+
+| System | Attempts | Collisions | Outcome |
+|---|---:|---:|---|
+| **NanoJev** | **244** | **36** | **Goal reached** |
+| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 2,738 | 1,044 | Goal reached |
+| Starting NanoJev | 171 | 43 | Goal reached |
+
+### 12×12 Snake
+
+A common planner filters immediate collisions and finds static paths toward the visible food. The model breaks ties among remaining actions. Seed: 61005, controller: greedy.
+
+| System | Food collected | Steps | Outcome |
+|---|---:|---:|---|
+| **NanoJev** | **27** | **256** | **Alive at horizon** |
+| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 30 | 256 | Alive at horizon |
+| Untuned Qwen3-0.6B | 25 | 211 | Trapped |
+
+The untuned Qwen baseline uses its original pretrained weights and native language-model head, conditioned on offered A–D answer tokens.
+
+### Earlier 40-map navigation benchmark
+
+Controller: T=1 probability sampling across 20 test maps and 20 OOD maps.
+
+| System | 4×4 test | 6×6 OOD |
+|---|---:|---:|
+| **NanoJev** | **19/20 — 95%** | **18/20 — 90%** |
+| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 20/20 — 100% | 19/20 — 95% |
+| Untuned Qwen3-0.6B | 7/20 — 35% | 3/20 — 15% |
+
+## Key capabilities
+
+<CardGroup cols={2}>
+  <Card title="Dynamic Choice" icon="list-check">
+    Supply 2–255 candidates and receive a calibrated probability for every candidate in a single forward pass. Use any candidate as input to ranking, sampling, or greedy selection.
+  </Card>
+  <Card title="Boolean Decisions" icon="toggle-on">
+    Ask whether a complete proposition is true. The model returns the probability that the statement holds, without generating any explanation tokens.
+  </Card>
+  <Card title="Ordered Score" icon="chart-bar">
+    Supply 2–10 ordered level descriptions. The model returns the full level distribution plus the probability-weighted expected score.
+  </Card>
+  <Card title="Batched Parallel Inference" icon="bolt">
+    Group independent states and questions into a single request. All candidate paths share one backbone forward — evaluation time scales with batch depth, not question count.
+  </Card>
+  <Card title="Complete Distributions" icon="chart-pie">
+    Every response carries the full probability distribution, not just the argmax. Use the same output for deterministic control, stochastic sampling, or uncertainty-aware planning.
+  </Card>
+  <Card title="Persistent Serving" icon="server">
+    Load the checkpoint once and reuse it across repeated requests. The local service accepts up to 32 states, 96 questions, and 256 candidate paths per request.
+  </Card>
+</CardGroup>
+
+## Question types
+
+NanoJev supports three question types. Each type corresponds to a different decision-head architecture on top of the shared Qwen3-0.6B backbone.
+
+### Choice
+
+A **Choice** question presents a named set of 2–255 candidate descriptions. The shared scalar head and set-attention mechanism produce a softmax distribution over the candidates. Use Choice when the outcome is one of a discrete set of labeled options — actions, categories, or identifiers.
+
+**Required fields:** `instructions` (the decision prompt) and `criteria` (a key-to-description mapping, 2–255 entries).
+
+### Boolean
+
+A **Boolean** question asks whether a complete natural-language proposition is true. A single-path sigmoid returns the probability that the statement holds, expressed as `p_true`. Use Boolean for any yes/no judgment, safety check, or presence test.
+
+**Required fields:** `instructions` (the proposition to evaluate). Optional `criteria` may supply explicit `false` and `true` descriptions.
+
+### Score
+
+A **Score** question presents an ordered list of 2–10 level descriptions. The model evaluates each level description independently of set attention and returns the level distribution together with the probability-weighted expected index. Use Score for graded assessments: severity, quality, temperature bands, or any ordinal scale.
+
+**Required fields:** `instructions` (the scoring prompt) and `criteria` (an ordered array of 2–10 level descriptions).
+
+## Model and dataset
+
+NanoJev's weights and training data are publicly available on HuggingFace:
+
+- **Model:** [`C-Tianyu/NanoJev`](https://huggingface.co/C-Tianyu/NanoJev) — root checkpoint plus six game and calibrated-decision variant checkpoints.
+- **Dataset:** [`C-Tianyu/NanoJev-Data`](https://huggingface.co/datasets/C-Tianyu/NanoJev-Data) — training splits, frozen evaluation inputs, and all six Snake controller recordings.
+
+The local safety model reaches **77.84% accuracy on test questions** and **76.56% on 50×50 out-of-distribution questions**. The paired proper-reward arm of the probability-learning pilot reaches **0.11844 test / 0.06202 OOD distribution error**, measured as the sum of squared differences from the simulator's event probabilities.
+
+<Note>
+  New to NanoJev? Head to the [Quickstart](/quickstart) to install dependencies, download the model, and send your first batched inference request in under 10 minutes.
+</Note>

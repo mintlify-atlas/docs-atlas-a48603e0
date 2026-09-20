@@ -1,0 +1,138 @@
+---
+title: "NanoJev Model Checkpoints and HuggingFace Downloads"
+sidebarTitle: "Model Checkpoints"
+description: "Download NanoJev checkpoints from HuggingFace, understand the checkpoint variants, and verify downloaded artifacts against the training manifests."
+---
+
+NanoJev publishes all trained checkpoints and the matching dataset on HuggingFace under [C-Tianyu/NanoJev](https://huggingface.co/C-Tianyu/NanoJev) and [C-Tianyu/NanoJev-Data](https://huggingface.co/datasets/C-Tianyu/NanoJev-Data). Each variant checkpoint includes complete model weights, tokenizer, backbone configuration, training configuration, and evaluation summary. The dataset includes original training stages plus the `games_v4` package with frozen game data and Snake controller recordings.
+
+## Checkpoint variants
+
+The root checkpoint is the initialization model and the navigation baseline used for the earlier 40-map benchmark. All trained game and calibrated-decision variants live under `variants/`.
+
+| Use | Checkpoint |
+|---|---|
+| 50×50 maze demo | `variants/local_atomic_seed17` |
+| Snake demo | `variants/games_gold_seed17` |
+| Full-map comparison | `variants/games_api_seed17` |
+| Calibrated-decision experiments | `variants/events_ce_seed17`, `variants/events_brier_seed17`, `variants/events_paired_seed17` |
+| Root / navigation baseline | root (`best.safetensors`) |
+
+Each variant corresponds to a specific training dataset under `games_v4/data/`:
+
+| Checkpoint | Training data |
+|---|---|
+| `local_atomic_seed17` | `local_maze_v1/` |
+| `games_gold_seed17` | `scaled_games_v4b/policy/` |
+| `games_api_seed17` | `scaled_games_labeled_v4/` |
+| `events_ce_seed17`, `events_brier_seed17`, `events_paired_seed17` | `scaled_games_v4b/events/` |
+
+## Download a variant
+
+Use `snapshot_download` with an `allow_patterns` filter to retrieve only the variant you need:
+
+```python
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+variant = "local_atomic_seed17"  # Select "games_gold_seed17" for Snake.
+snapshot = snapshot_download(
+    repo_id="C-Tianyu/NanoJev",
+    allow_patterns=[f"variants/{variant}/*"],
+)
+checkpoint_dir = Path(snapshot) / "variants" / variant
+```
+
+Replace the `variant` string with any name from the table above. The download includes all files in that variant's directory: weights, config, tokenizer, logs, and prediction files.
+
+## Download the root checkpoint
+
+The root checkpoint is the base model used for the earlier 40-map navigation benchmark and as the initialization point for all variant training runs.
+
+```python
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="C-Tianyu/NanoJev",
+    local_dir="checkpoints/NanoJev",
+    allow_patterns=["best.safetensors", "config.json", "tokenizer/*", "backbone_config/*"],
+)
+```
+
+## Download the dataset
+
+The `games_v4` package contains training splits, frozen evaluation inputs, and all six Snake controller recordings:
+
+```python
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="C-Tianyu/NanoJev-Data",
+    repo_type="dataset",
+    local_dir="data/NanoJev",
+    allow_patterns=["games_v4/*"],
+)
+```
+
+The package includes:
+
+- **`stage1/all.jsonl`** and **`stage2/all.jsonl`** — original training data with preserved split assignments (train/dev/calibration/test/OOD)
+- Frozen game data directories under `games_v4/data/` for each training variant
+- Six Snake controller recordings as lossless gzip files under `games_v4/arcade/rollouts/`
+- A `manifest.json` recording file hashes and actual retained counts
+
+Validate the download:
+
+```bash
+python data/NanoJev/games_v4/verify_dataset.py
+python scripts/train_pipeline_decisions.py \
+  --input data/NanoJev/games_v4/data/local_maze_v1 --validate-only
+python scripts/train_pipeline_decisions.py \
+  --input data/NanoJev/games_v4/data/scaled_games_v4b/events --validate-only
+```
+
+## Checkpoint structure
+
+Every checkpoint directory — root or variant — contains the following artifacts:
+
+| File / directory | Contents |
+|---|---|
+| `best.safetensors` | Selected model parameters (weights at the checkpoint step chosen by dev NLL) |
+| `config.json` | Model architecture, revision hash, training arguments, environment and dependency info, and data SHA-256 hashes |
+| `tokenizer/` | Tokenizer files required to encode inputs |
+| `backbone_config/` | Files needed to load the checkpoint locally without the original Qwen package |
+| `train_log.json` | Per-update training loss and periodic dev evaluations |
+| `summary.json` | Selected step, per-split metrics, timing statistics, and memory statistics |
+| `predictions_dev.jsonl` | Dev-set predictions and targets |
+| `predictions_calibration.jsonl` | Calibration-set predictions and targets |
+| `predictions_test.jsonl` | Test-set predictions and targets |
+| `predictions_ood.jsonl` | OOD-set predictions and targets |
+
+## Using a downloaded checkpoint
+
+Start the persistent decision service using a downloaded checkpoint:
+
+```bash
+python scripts/serve_decisions.py \
+  --checkpoint-dir checkpoints/NanoJev \
+  --web-root web --port 8765
+```
+
+Open `http://127.0.0.1:8765`. The service loads the model once and accepts repeated batches through `POST /api/evaluate`.
+
+Run a quick local inference check with the toy prediction script:
+
+```bash
+python scripts/predict_toy_decisions.py \
+  --checkpoint-dir checkpoints/NanoJev
+```
+
+Both commands accept any checkpoint directory — root or variant — by passing its path to `--checkpoint-dir`.
+
+<Note>
+A backbone-only download (just `best.safetensors`) is not the same as the full checkpoint package. The `config.json` records the model architecture and revision hash, and the `tokenizer/` directory is required for encoding inputs. Always include `config.json`, `tokenizer/*`, and `backbone_config/*` when downloading for local loading.
+</Note>
+
+<Tip>
+Use `variants/local_atomic_seed17` for the 50×50 maze controller — it was trained on matched 5×5 local-window inputs and four parallel safety questions. Use `variants/games_gold_seed17` for the Snake controller — it was trained on scaled game policy data with dynamic action choices.
+</Tip>

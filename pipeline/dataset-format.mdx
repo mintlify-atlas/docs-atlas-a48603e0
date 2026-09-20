@@ -1,0 +1,202 @@
+---
+title: "NanoJev Training Record Schema and Dataset Format"
+sidebarTitle: "Dataset Format"
+description: "NanoJev training datasets are JSONL files where each record contains a state, typed questions, and gold probability distributions as targets."
+---
+
+NanoJev training datasets are JSONL files where each line is one complete JSON object called a **training record**. A record binds a shared evaluation context (the `state`) to one or more typed questions and their target probability distributions (`gold_probs`). The state is presented identically to every question in the record; questions ask different things about the same state. Splits are assigned at the record level and enforced by state and source-group separation, so related variations are never spread across train and test.
+
+## Complete example record (bag draw)
+
+The following record describes a draw from a known distribution. Because the draw is unobserved, `gold` is omitted entirely and the target is supplied purely through `gold_probs`:
+
+```json
+{
+  "id": "bag_001",
+  "state_id": "bag_001",
+  "family_id": "known_bag_probability",
+  "split": "train",
+  "state": "A token is drawn uniformly from a bag containing three red tokens and one blue token. The draw has not been observed.",
+  "questions": {
+    "color": {
+      "type": "choice",
+      "instructions": "What is the probability distribution of the drawn token's color?",
+      "criteria": {"red": "The token is red", "blue": "The token is blue"}
+    },
+    "is_red": {
+      "type": "boolean",
+      "instructions": "The drawn token is red."
+    }
+  },
+  "gold_probs": {
+    "color": {"red": 0.75, "blue": 0.25},
+    "is_red": {"false": 0.25, "true": 0.75}
+  },
+  "gold_probs_kind": "programmatic_conditional_distribution",
+  "metadata": {"source_group_id": "bag:red3:blue1"}
+}
+```
+
+## Top-level field reference
+
+<ParamField body="id" type="string" required>
+  Unique identifier for this record. Must be distinct across all records in the dataset. The trainer rejects duplicate IDs.
+</ParamField>
+
+<ParamField body="state_id" type="string" required>
+  Identifies the physical or semantic state. Records that share the same `state_id` must share the same split. Use this field to group augmentations of the same underlying situation.
+</ParamField>
+
+<ParamField body="family_id" type="string" required>
+  Groups records by their data-generation procedure or task family. Used for per-family metric breakdowns in the evaluation outputs.
+</ParamField>
+
+<ParamField body="split" type="string" required>
+  Dataset split assignment. Must be one of `train`, `dev`, `calibration`, `test`, or `ood`. The trainer requires non-empty `train`, `dev`, and `test` splits.
+</ParamField>
+
+<ParamField body="state" type="string | object | array" required>
+  The shared evaluation context presented to every question in this record. May be a plain string, a structured object, or an array. Only `id`, `state`, and `questions` are presented to the model at inference time; all target and grouping fields are stripped.
+</ParamField>
+
+<ParamField body="questions" type="object" required>
+  A map from question ID strings to question definition objects. Each question definition contains `type`, `instructions`, and optionally `criteria`. Only these three fields are permitted inside a question — targets and grouping metadata must stay outside the question object.
+</ParamField>
+
+<ParamField body="gold_probs" type="object" required>
+  Map from question ID to a probability distribution over that question's candidates. Keys must exactly match all candidate IDs for the question. Every value must be a finite number in `[0, 1]`. The distribution must sum to exactly `1.0` (tolerance `1e-8`). Zero probabilities are valid.
+</ParamField>
+
+<ParamField body="gold_probs_kind" type="string | object" required>
+  Declares the type of distributional target. Either a single string that applies to all questions, or an object mapping question IDs to per-question kind strings. See the [gold_probs_kind values](#gold_probs_kind-values) table below.
+</ParamField>
+
+<ParamField body="gold" type="boolean | string | integer">
+  Optional hard target label. For Boolean questions, use a JSON boolean. For Choice questions, use the candidate ID string. For Score questions, use a zero-based integer level. When `gold_probs` is present, the distribution loss takes precedence. An unobserved probabilistic target (as in the bag example above) can omit `gold` entirely.
+</ParamField>
+
+<ParamField body="metadata" type="object">
+  Optional grouping and provenance metadata. The `source_group_id` field groups related record variations into the same split. Records sharing a `source_group_id` must share the same split; the trainer rejects cross-split group violations.
+</ParamField>
+
+## Question definition fields
+
+Each question object inside `questions` supports three types. Only `type`, `instructions`, and `criteria` may appear inside a question definition.
+
+### Choice
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | Must be `"choice"` |
+| `instructions` | string | Task instruction presented to the model |
+| `criteria` | object | Map from candidate ID string to candidate description string. Must contain 2 to 255 candidates. |
+
+The model returns a probability distribution over every supplied candidate. `gold_probs` keys must exactly match the candidate IDs.
+
+### Boolean
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | Must be `"boolean"` |
+| `instructions` | string | A complete proposition to evaluate |
+| `criteria` | object | Optional; may contain `"false"` and/or `"true"` descriptions |
+
+The model returns `p_true`, the probability that the proposition is true. `gold_probs` uses the fixed keys `"false"` and `"true"`.
+
+### Score
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | Must be `"score"` |
+| `instructions` | string | Instruction for classifying along an ordered scale |
+| `criteria` | array | Ordered array of 2 to 10 level description strings |
+
+The model returns a distribution over the levels and their probability-weighted expected index. `gold_probs` uses string keys `"0"` through `"K-1"` where K is the number of levels.
+
+## gold_probs_kind values
+
+| Value | Meaning |
+|---|---|
+| `deterministic_truth` | One-hot target. Exactly one candidate has probability `1.0`; all others are `0.0`. Used for factual questions with a single correct answer. |
+| `programmatic_conditional_distribution` | A known conditional event distribution computed analytically or from an explicit generative process. The bag-draw example above uses this kind. |
+| `optimal_action_policy` | Uniform mass over all optimal actions in a planning or game setting. For navigation records, the model learns to assign equal probability to every shortest-path move. This is a policy target, not a calibrated success-probability or event distribution. |
+
+## Complete example record (score question)
+
+The following record illustrates all three question types in a single state. The `gold_probs_kind` is specified per question:
+
+```json
+{
+  "id": "support:billing:none:0",
+  "state_id": "support:billing:none:0",
+  "family_id": "support_decisions_v1",
+  "split": "train",
+  "state": "Ticket topic: a duplicate charge. Refund record: no refund was requested. Impact: all features work without obstruction.",
+  "questions": {
+    "route": {
+      "type": "choice",
+      "instructions": "Using this record, choose a support team from the main topic only; refund and impact are separate fields.",
+      "criteria": {
+        "billing": "Charges, payments, and refunds",
+        "technical": "Software errors and broken features",
+        "shipping": "Parcel transport and delivery"
+      }
+    },
+    "completed": {
+      "type": "boolean",
+      "instructions": "Using this record, has the refund actually been paid and completed? Requests, processing, approval, or denial do not count."
+    },
+    "severity": {
+      "type": "score",
+      "instructions": "Using this record, choose the severity level matching the explicitly recorded impact.",
+      "criteria": [
+        "All features work normally",
+        "Minor feature blocked; workaround exists",
+        "Core feature blocked; workaround exists",
+        "Entire service down; no workaround"
+      ]
+    }
+  },
+  "gold": {
+    "route": "billing",
+    "completed": false,
+    "severity": 0
+  },
+  "gold_probs": {
+    "route": {"billing": 1.0, "technical": 0.0, "shipping": 0.0},
+    "completed": {"false": 1.0, "true": 0.0},
+    "severity": {"0": 1.0, "1": 0.0, "2": 0.0, "3": 0.0}
+  },
+  "gold_probs_kind": {
+    "route": "deterministic_truth",
+    "completed": "deterministic_truth",
+    "severity": "deterministic_truth"
+  },
+  "metadata": {
+    "source_group_id": "support:billing:none:0"
+  }
+}
+```
+
+## Split rules
+
+Supported splits are `train`, `dev`, `calibration`, `test`, and `ood`. The trainer enforces two separation constraints:
+
+1. **State separation.** All records sharing the same `state_id` must be assigned to the same split.
+2. **Source-group separation.** All records sharing the same `metadata.source_group_id` must be assigned to the same split.
+
+Violations raise an error before training begins. The calibration and OOD splits are optional; if absent, the trainer simply skips their evaluation pass. The test split is evaluated only after checkpoint selection on the dev split.
+
+## Validation command
+
+Run a schema and split-separation audit against any JSONL file or directory of split files without loading a model:
+
+```bash
+python scripts/train_pipeline_decisions.py --input your_data.jsonl --validate-only
+```
+
+The command accepts either a single merged file or a directory containing `train.jsonl`, `dev.jsonl`, and other standard split files. It prints a summary of record and question counts by split.
+
+<Warning>
+  Every question's `gold_probs` distribution must sum to exactly `1.0`. The validator enforces a tolerance of `1e-8`. Zero probabilities are valid and are distinct from a missing key — the candidate must still appear in the mapping with value `0.0`.
+</Warning>

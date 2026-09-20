@@ -1,0 +1,157 @@
+---
+title: "NanoJev Question Types: Choice, Boolean, and Score"
+sidebarTitle: "Question Types"
+description: "NanoJev supports three question primitives — Choice for multi-candidate decisions, Boolean for true/false propositions, and Score for ordered level distributions."
+---
+
+NanoJev expresses every structured decision as one of three question types. **Choice** handles multi-candidate decisions where the options are not naturally ordered. **Boolean** evaluates whether a complete proposition is true. **Score** handles ordinal judgments across a defined set of descriptive levels. Together these three primitives cover the space of structured decisions without requiring free-form generation or application-level parsing.
+
+## Choice
+
+A Choice question asks the model to distribute probability across a set of named, described candidates. The model returns a probability for every candidate, not just the winner.
+
+**Fields:**
+- `type`: `"choice"`
+- `instructions`: A complete, self-contained description of what is being decided.
+- `criteria`: A JSON object mapping option keys to descriptions. Must contain 2–255 entries. Both the key name and the description text are semantic inputs to the model; they both appear in each candidate's leaf sequence.
+
+**Response:** A probability for every candidate in the `criteria` map, plus the key of the highest-probability candidate.
+
+**Architecture:** A shared scalar head scores each candidate. An optional set-attention layer combines candidate representations within the same question before the final softmax, letting the model weigh all options together.
+
+**Example — the living room action question:**
+
+```json
+{
+  "type": "choice",
+  "instructions": "Choose the action that most directly lowers the room temperature.",
+  "criteria": {
+    "cool": "Turn on air conditioning",
+    "light": "Turn on the lights",
+    "wait": "Keep the current settings"
+  }
+}
+```
+
+The option keys (`cool`, `light`, `wait`) and their descriptions are both encoded in each candidate leaf. Reordering the entries in the `criteria` object preserves each candidate's named input — the model sees the same text regardless of insertion order.
+
+## Boolean
+
+A Boolean question evaluates the truth of a complete proposition. The instruction states the proposition as a full declarative sentence; the model returns the probability that the proposition is true.
+
+**Fields:**
+- `type`: `"boolean"`
+- `instructions`: The proposition to evaluate, stated as a complete sentence.
+- `criteria` *(optional)*: A JSON object with at most two keys, `"false"` and `"true"`, providing explicit label descriptions. When present, each description is appended to the shared prefix before the single candidate path.
+
+**Response:** `p_true` and `p_false` (summing to 1.0). Inference returns `p_true` as the primary value, along with a thresholded `value` boolean.
+
+**Architecture:** A single-path sigmoid. Boolean contributes exactly one candidate path to the batch regardless of how many Boolean questions are in the request.
+
+**Example — the living room occupancy question:**
+
+```json
+{
+  "type": "boolean",
+  "instructions": "Someone is home."
+}
+```
+
+With optional criteria:
+
+```json
+{
+  "type": "boolean",
+  "instructions": "The drawn token is red.",
+  "criteria": {
+    "false": "The token is blue.",
+    "true": "The token is red."
+  }
+}
+```
+
+When criteria are present, the false description is encoded before the true description in the shared prefix. The model evaluates one leaf for the true proposition.
+
+<Note>
+  NanoJev uses `type: "boolean"`. The direct TypeSafe Jev API uses `type: "noul"` and returns a field named `noul` for the true-probability. A compatibility adapter must explicitly remap these type names and response fields. Passing `type: "noul"` to NanoJev's local inference fails schema validation.
+</Note>
+
+## Score
+
+A Score question evaluates an ordered set of descriptive levels. The model returns a distribution over the levels and an expected score — the probability-weighted level index.
+
+**Fields:**
+- `type`: `"score"`
+- `instructions`: A complete description of the judgment being made.
+- `criteria`: An ordered JSON array of 2–10 level descriptions. The array position determines the level's numeric index (0-based). Each description must be self-contained; the model sees only one description per leaf with no injected index or adjacent level text.
+
+**Response:** A probability for each level (indexed `"0"` through `"K-1"`), the level with the highest probability, and the expected score `Σ(i · p_i)`.
+
+**Architecture:** Each level description is evaluated independently with no set-attention step. Shared scalar head scoring is applied per-leaf and normalized across all levels with a softmax.
+
+**Example — the living room heat score question:**
+
+```json
+{
+  "type": "score",
+  "instructions": "Classify how far the room temperature exceeds the target.",
+  "criteria": [
+    "At or below target",
+    "Above target by at most 3 degrees",
+    "Above target by more than 3 degrees"
+  ]
+}
+```
+
+Level 0 is `"At or below target"`, level 1 is `"Above target by at most 3 degrees"`, and level 2 is `"Above target by more than 3 degrees"`. Moving a description to a different array position changes its reported numeric index but does not alter its leaf input text.
+
+<Tip>
+  Use **Score** when the candidates represent an ordinal scale and the ordering carries meaning — for example, severity, distance from a target, or quality tiers. Use **Choice** when candidates are not naturally ordered, or when the best option is situationally determined rather than defined by a fixed scale.
+</Tip>
+
+## Comparison
+
+| Type | Candidates | Response | Architecture |
+|---|---|---|---|
+| `choice` | 2–255 named, described options | Probability for every candidate + highest-probability key | Scalar head + set attention |
+| `boolean` | Fixed: `false` / `true` | `p_true`, `p_false`, thresholded value | Single-path sigmoid |
+| `score` | 2–10 ordered level descriptions | Distribution over levels + expected score | Scalar head per level, no set attention |
+
+## Combined Request Example
+
+The following request sends all three question types together for one state. The model evaluates all candidate paths — three for Choice, one for Boolean, three for Score — in a single backbone forward:
+
+```json
+{
+  "states": [{
+    "id": "living_room",
+    "state": "The living room is 29 degrees. The target is 24 degrees. The window is closed and someone is home.",
+    "questions": {
+      "action": {
+        "type": "choice",
+        "instructions": "Choose the action that most directly lowers the room temperature.",
+        "criteria": {
+          "cool": "Turn on air conditioning",
+          "light": "Turn on the lights",
+          "wait": "Keep the current settings"
+        }
+      },
+      "occupied": {
+        "type": "boolean",
+        "instructions": "Someone is home."
+      },
+      "heat": {
+        "type": "score",
+        "instructions": "Classify how far the room temperature exceeds the target.",
+        "criteria": [
+          "At or below target",
+          "Above target by at most 3 degrees",
+          "Above target by more than 3 degrees"
+        ]
+      }
+    }
+  }]
+}
+```
+
+This single request produces 7 candidate paths total (3 + 1 + 3) and requires 1 backbone forward. Each question's answer is independent: the `occupied` result does not influence the `action` or `heat` scores.

@@ -1,0 +1,127 @@
+---
+title: "NanoJev Game Benchmarks: Maze and Snake Performance"
+sidebarTitle: "Game Benchmarks"
+description: "Recorded results comparing NanoJev, Jev, and untuned Qwen3-0.6B on 50×50 maze navigation and 12×12 Snake across multiple controller configurations."
+---
+
+NanoJev's recorded benchmarks pit three systems against identical game environments using identical controller code: the trained NanoJev checkpoint, Jev (TypeSafe's production model accessed through its API), and the untuned Qwen3-0.6B base. Every table below comes from frozen trajectory recordings; the actual actions, probabilities, and final outcomes are preserved and replayable.
+
+## 50×50 maze benchmark
+
+The task is to find the exit of a 50×50 maze. The model never sees the full map. At each step it receives a 5×5 ASCII window centered on the agent and answers four parallel Boolean safety questions — one per cardinal direction — each asking whether a one-cell attempt in that direction is traversable.
+
+The exploration controller is pure code: it remembers every collision, ranks untried edges by predicted safety and goal Manhattan distance, and repositions through already-confirmed open paths when all nearby frontiers are exhausted. Low-probability edges can still be probed, allowing the agent to recover from false-negative judgments.
+
+The benchmark uses **2 × size²** attempts as the total budget (5,000 for 50×50), counting both successful moves and collisions.
+
+| System | Attempts | Collisions | Outcome |
+|---|---:|---:|---|
+| **NanoJev** | **244** | **36** | **Goal reached** |
+| Jev | 2,738 | 1,044 | Goal reached |
+| Starting NanoJev | 171 | 43 | Goal reached |
+
+**Starting NanoJev** is an earlier trained checkpoint that preceded the current matched local-safety training run. It uses the same exploration controller but was trained on a different question distribution. The current NanoJev model uses matched local safety training: the training inputs are generated with the same 5×5 renderer used at inference time.
+
+## 12×12 Snake benchmark
+
+The task is to keep the snake alive and collect as many food pellets as possible on a 12×12 board over a 256-step horizon.
+
+The common planner first filters any action that would cause an immediate collision, then scores remaining actions by shortest static-path distance to the visible food. The model's role is to break ties among the surviving candidates; when only one safe action remains, the code forces that move directly. The benchmark uses **seed 61005** and the **greedy** controller.
+
+| System | Food collected | Steps | Outcome |
+|---|---:|---:|---|
+| **NanoJev** | **27** | **256** | **Alive at horizon** |
+| Jev | 30 | 256 | Alive at horizon |
+| Untuned Qwen3-0.6B | 25 | 211 | Trapped |
+
+**Untuned Qwen3-0.6B** uses the original pretrained weights and the model's native language-model head. It is conditioned on the offered A–D answer tokens without any decision-head fine-tuning. Both NanoJev and Jev survive the full 256-step horizon; the untuned model becomes trapped at step 211.
+
+## 40-map navigation benchmark
+
+An earlier benchmark evaluates map-completion success using **T=1 probability sampling** across 40 maps: 20 test maps (4×4 boards) and 20 OOD maps (6×6 boards). The OOD maps test generalization to board sizes not seen during training.
+
+| System | 4×4 test | 6×6 OOD |
+|---|---:|---:|
+| **NanoJev** | **19/20 — 95%** | **18/20 — 90%** |
+| Jev | 20/20 — 100% | 19/20 — 95% |
+| Untuned Qwen3-0.6B | 7/20 — 35% | 3/20 — 15% |
+
+NanoJev closes most of the gap to Jev and improves substantially over the untuned base model, especially on OOD maps where untuned Qwen succeeds only 15% of the time.
+
+## Local safety accuracy
+
+The local-atomic NanoJev checkpoint is evaluated on a frozen question cohort of 300 states / 1,200 questions derived from 8×8, 16×16, and 32×32 training maps plus 50×50 OOD maps.
+
+- **Test accuracy:** 77.84% (176 questions; constant-true baseline 56.25%)
+- **OOD accuracy (50×50):** 76.56% (64 questions; constant-true baseline 56.25%)
+
+True and false labels are reported separately; the OOD split contains held-out board sizes, not held-out question types.
+
+## Probability learning results
+
+The probability-learning pilot trains three arms on observed collision-free movement events drawn from maze and Snake simulators with a noisy actuator. Each arm starts from the same NanoJev checkpoint; the paired proper-reward arm implements an RLCD-inspired policy-gradient objective.
+
+The paired proper-reward arm reaches **0.11844 test / 0.06202 OOD distribution error**, measured as the sum of squared differences from the simulator's exact event probabilities. See the [RLCD page](/experiments/rlcd) for the complete table and methodology.
+
+## Scaled environments
+
+The full training pipeline covers a broad range of game configurations:
+
+- **Maze sizes:** 8×8, 16×16, 32×32, and 50×50 boards (50×50 held out as OOD by default)
+- **Maze topologies:** `corridor` (DFS with straight-run bias), `tree` (unbiased DFS, more dead ends), `loops` (additional passages creating cycles), and `random_obstacle` (seeded obstacle density)
+- **Multiple positions per map:** initial episode start plus sampled near-goal, distant junction, and reachable decision positions
+- **Snake:** reproducible food generation, body growth, collision rules, tail movement, and dynamic action candidates across 8×8, 16×16, 32×32, and 50×50 boards
+
+The recorded v4b pilot contains 589 policy states / 3,195 questions and 2,356 event states.
+
+## Reproducing the benchmarks
+
+The game data is published in the `games_v4` package on HuggingFace under [C-Tianyu/NanoJev-Data](https://huggingface.co/datasets/C-Tianyu/NanoJev-Data). The dataset includes `stage1/all.jsonl` and `stage2/all.jsonl` with their original split assignments, plus the six frozen Snake controller recordings.
+
+Download and verify the package:
+
+```python
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="C-Tianyu/NanoJev-Data",
+    repo_type="dataset",
+    local_dir="data/NanoJev",
+    allow_patterns=["games_v4/*"],
+)
+```
+
+Validate the data files:
+
+```bash
+python data/NanoJev/games_v4/verify_dataset.py
+python scripts/train_pipeline_decisions.py \
+  --input data/NanoJev/games_v4/data/local_maze_v1 --validate-only
+```
+
+Replay the maze showcase:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate_model_edges_maze.py \
+  --episodes results/rollout_pilot_episodes.jsonl \
+  --engine checkpoint --checkpoint checkpoints/NanoJev/variants/local_atomic_seed17 \
+  --max-steps 0 --batch-states 2 --batch-questions 0 --max-length 2048 \
+  --output runs/hosted_game_repro/maze.json
+```
+
+Replay the Snake showcase (all eight frozen cases, greedy controller):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate_composed_snake.py \
+  --episodes data/NanoJev/games_v4/arcade/cohort.jsonl \
+  --engine checkpoint --checkpoint checkpoints/NanoJev/variants/games_gold_seed17 \
+  --controller greedy --max-steps 256 --seed 17 \
+  --batch-states 2 --batch-questions 0 --max-length 8192 \
+  --output runs/hosted_game_repro/snake.json
+```
+
+See the [Game Release docs](/experiments/model-checkpoints) for the complete checkpoint and dataset download guide, and [Model Checkpoints](/experiments/model-checkpoints) for checkpoint variant descriptions.
+
+<Note>
+All benchmarks use frozen cohorts and recorded trajectories. Replay verification is available in `web/arcade.html` — start a local server with `python3 -m http.server 8080 --bind 127.0.0.1 --directory web` and open `http://127.0.0.1:8080/arcade.html` to step through the actual maze and Snake trajectories, inspect individual model decisions, and compare all three systems side by side.
+</Note>

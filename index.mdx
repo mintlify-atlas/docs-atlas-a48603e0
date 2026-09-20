@@ -1,20 +1,68 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "NanoJev: Parallel Decision Model with Zero Output Decoding"
+sidebarTitle: "Home"
+description: "NanoJev is a 0.6B decision model that returns complete probability distributions over choices, booleans, and scores in a single forward pass — no token-by-token generation required."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+NanoJev is a nano replica of [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) — a 0.6B decision model built on Qwen3-0.6B. Feed it a state and a set of questions and it returns a complete probability distribution over every candidate in a single forward pass. No output-token decoding, no generation loop. Batch multiple independent states and questions together and they all resolve in one backbone forward.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    What NanoJev is, how it works, and where it fits in the decision-model landscape.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Download the model, start the service, and send your first batched decision request.
+  </Card>
+  <Card title="Question Types" icon="list-check" href="/concepts/question-types">
+    Choice, Boolean, and Score — the three primitives that define every NanoJev decision.
+  </Card>
+  <Card title="Training Pipeline" icon="gears" href="/pipeline/overview">
+    Generate a programmatic dataset, train a checkpoint, extend with navigation data, and evaluate.
+  </Card>
+  <Card title="Inference API" icon="server" href="/serving/inference-api">
+    POST /api/evaluate request and response schema, limits, and example payloads.
+  </Card>
+  <Card title="Experiments & Results" icon="chart-bar" href="/experiments/game-benchmarks">
+    Maze and Snake game benchmarks comparing NanoJev against Jev and untuned Qwen3-0.6B.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## How it works in 60 seconds
+
+<Steps>
+  <Step title="Define your state and questions">
+    A **state** is the shared context — text, JSON object, or array. Each **question** asks the model to judge that state using a Choice, Boolean, or Score primitive.
+  </Step>
+  <Step title="Send a batched request">
+    Package one or more states and their questions into a JSON payload and POST it to `/api/evaluate`. Multiple states are evaluated in a single backbone forward.
+  </Step>
+  <Step title="Read the probability distributions">
+    Each answer contains the full distribution over its candidates. Use the probabilities for greedy selection, ranked scoring, or probability sampling — no sampling loop needed.
+  </Step>
+  <Step title="Train or fine-tune your own checkpoint">
+    Provide a JSONL dataset with `gold_probs` targets, run `train_pipeline_decisions.py`, and extend the checkpoint with your own task data.
+  </Step>
+</Steps>
+
+## Key capabilities
+
+<CardGroup cols={3}>
+  <Card title="Zero decoding overhead" icon="bolt">
+    Decisions come directly from a forward pass. No autoregressive token generation, no sampling loop.
+  </Card>
+  <Card title="Dynamic candidate sets" icon="sliders">
+    Choice questions accept 2–255 named candidates per question. Candidate sets can differ between questions in the same batch.
+  </Card>
+  <Card title="Complete distributions" icon="chart-pie">
+    Every response includes probabilities for all candidates — use the same output for greedy selection, ranking, or sampling.
+  </Card>
+  <Card title="Parallel decisions" icon="layer-group">
+    Batch independent states and questions together. One backbone forward handles 6 states, 18 questions, and 44 candidate paths simultaneously.
+  </Card>
+  <Card title="End-to-end pipeline" icon="diagram-project">
+    Programmatic data generation, training, evaluation, and serving are all included in the repository.
+  </Card>
+  <Card title="Calibrated probabilities" icon="bullseye">
+    RLCD-inspired training with CE, Brier, and paired proper-reward objectives for calibrated event prediction.
+  </Card>
+</CardGroup>

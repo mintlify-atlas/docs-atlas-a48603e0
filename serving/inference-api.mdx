@@ -1,0 +1,341 @@
+---
+title: "NanoJev Inference API: POST /api/evaluate Reference"
+sidebarTitle: "Inference API"
+description: "Complete reference for the POST /api/evaluate endpoint — request schema, response fields, question types, error codes, and worked examples."
+---
+
+The NanoJev inference API accepts a JSON request body containing one or more states, each paired with a set of questions. For every question the model returns a **complete probability distribution** over the candidate set — with zero output-token decoding. The service reads decisions directly from a single backbone forward pass, so the response includes exact probabilities for every candidate simultaneously.
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/health` | Returns service readiness status |
+| `POST` | `/api/evaluate` | Main batched inference endpoint |
+
+### GET /api/health
+
+Returns the current service state. No request body required.
+
+```json
+{"ready": true, "model_loaded_once": true, "provider_calls": 0}
+```
+
+### POST /api/evaluate
+
+Accepts a JSON body. Returns probability distributions for all questions across all states in a single response.
+
+## Request schema
+
+The request body must be a JSON object with exactly one top-level key: `states`.
+
+<ParamField body="states" type="array" required>
+  A non-empty list of state objects. Maximum 32 states per request.
+</ParamField>
+
+### State object
+
+Each element of `states` must be an object with exactly the fields `id`, `state`, and `questions`.
+
+<ParamField body="states[].id" type="string" required>
+  A unique, non-empty string identifier for this state. Duplicate IDs within a single request are rejected with a `400` error.
+</ParamField>
+
+<ParamField body="states[].state" type="string | object | array" required>
+  The evaluation context for this state. May be a plain string, a JSON object, or a JSON array. Must not be empty.
+</ParamField>
+
+<ParamField body="states[].questions" type="object" required>
+  A non-empty map from question ID strings to question definition objects. Question IDs must be unique non-empty strings within each state.
+</ParamField>
+
+### Question definition fields
+
+Each question definition object must include `type` and `instructions`. The `criteria` field is required for `choice` and `score` questions and optional for `boolean`.
+
+<ParamField body="states[].questions[qid].type" type="string" required>
+  Question type. One of `"choice"`, `"boolean"`, or `"score"`.
+</ParamField>
+
+<ParamField body="states[].questions[qid].instructions" type="string" required>
+  The question prompt. Must be a non-empty string.
+</ParamField>
+
+<ParamField body="states[].questions[qid].criteria" type="object | array">
+  Candidate definitions. Shape depends on question type:
+
+  - **`choice`** (required): an object mapping 2–255 candidate ID strings to non-empty description strings.
+  - **`boolean`** (optional): an object with optional `"false"` and/or `"true"` keys mapping to non-empty description strings.
+  - **`score`** (required): an ordered array of 2–10 non-empty level description strings.
+</ParamField>
+
+## Response schema
+
+<ResponseField name="schema_version" type="string">
+  Schema identifier for the response format. Current value: `"openjev-toy-inference-v1"`.
+</ResponseField>
+
+<ResponseField name="states" type="array">
+  Array of state result objects, one per state in the request, in the same order.
+</ResponseField>
+
+<ResponseField name="states[].id" type="string">
+  The state identifier from the request.
+</ResponseField>
+
+<ResponseField name="states[].answers" type="object">
+  Map from question ID to answer object. Contains one entry for every question defined in the request state.
+</ResponseField>
+
+### Answer object — Choice question
+
+<ResponseField name="states[].answers[qid].type" type="string">
+  Always `"choice"`.
+</ResponseField>
+
+<ResponseField name="states[].answers[qid].choice" type="string">
+  The candidate ID with the highest probability (argmax).
+</ResponseField>
+
+<ResponseField name="states[].answers[qid].probabilities" type="object">
+  Map from each candidate ID to its probability. All values are finite, between 0 and 1, and sum to 1.
+</ResponseField>
+
+### Answer object — Boolean question
+
+<ResponseField name="states[].answers[qid].type" type="string">
+  Always `"boolean"`.
+</ResponseField>
+
+<ResponseField name="states[].answers[qid].p_true" type="number">
+  Probability that the proposition is true.
+</ResponseField>
+
+<ResponseField name="states[].answers[qid].value" type="boolean">
+  `true` if `p_true` ≥ 0.5 (argmax answer), `false` otherwise.
+</ResponseField>
+
+<ResponseField name="states[].answers[qid].probabilities" type="object">
+  Map with keys `"false"` and `"true"` to their respective probabilities.
+</ResponseField>
+
+### Answer object — Score question
+
+<ResponseField name="states[].answers[qid].type" type="string">
+  Always `"score"`.
+</ResponseField>
+
+<ResponseField name="states[].answers[qid].score" type="number">
+  Expected level index: the probability-weighted sum `Σ i·p_i` over all levels.
+</ResponseField>
+
+<ResponseField name="states[].answers[qid].level" type="integer">
+  The level index with the highest probability (argmax).
+</ResponseField>
+
+<ResponseField name="states[].answers[qid].probabilities" type="object">
+  Map from string level indices (`"0"`, `"1"`, ..., `"K-1"`) to their probabilities.
+</ResponseField>
+
+### Execution metadata
+
+<ResponseField name="execution" type="object">
+  Timing and counter fields recorded during inference.
+</ResponseField>
+
+<ResponseField name="execution.server_evaluation_seconds" type="number">
+  Wall-clock seconds from the start of request processing to completion, as measured by the server.
+</ResponseField>
+
+<ResponseField name="execution.states" type="integer">
+  Number of states processed.
+</ResponseField>
+
+<ResponseField name="execution.questions" type="integer">
+  Total number of questions across all states.
+</ResponseField>
+
+<ResponseField name="execution.candidate_paths" type="integer">
+  Total number of candidate paths evaluated.
+</ResponseField>
+
+<ResponseField name="execution.forward_passes" type="integer">
+  Number of backbone forward passes used to evaluate all questions.
+</ResponseField>
+
+<ResponseField name="execution.precision" type="string">
+  Precision used for the forward pass: `"bf16"` or `"fp32"`.
+</ResponseField>
+
+<ResponseField name="execution.network_model_calls" type="integer">
+  Always `0`. The service never contacts an external model provider.
+</ResponseField>
+
+## Complete example
+
+The following example sends three independent questions for a single state — an action choice, an occupancy boolean, and a heat score — and shows a representative response.
+
+<CodeGroup>
+
+```bash curl
+curl http://127.0.0.1:8765/api/evaluate \
+  -H 'Content-Type: application/json' \
+  --data-binary '{
+  "states": [{
+    "id": "living_room",
+    "state": "The living room is 29 degrees. The target is 24 degrees. The window is closed and someone is home.",
+    "questions": {
+      "action": {
+        "type": "choice",
+        "instructions": "Choose the action that most directly lowers the room temperature.",
+        "criteria": {
+          "cool": "Turn on air conditioning",
+          "light": "Turn on the lights",
+          "wait": "Keep the current settings"
+        }
+      },
+      "occupied": {
+        "type": "boolean",
+        "instructions": "Someone is home."
+      },
+      "heat": {
+        "type": "score",
+        "instructions": "Classify how far the room temperature exceeds the target.",
+        "criteria": [
+          "At or below target",
+          "Above target by at most 3 degrees",
+          "Above target by more than 3 degrees"
+        ]
+      }
+    }
+  }]
+}'
+```
+
+```python Python
+import json
+import urllib.request
+
+request_body = {
+    "states": [{
+        "id": "living_room",
+        "state": "The living room is 29 degrees. The target is 24 degrees. The window is closed and someone is home.",
+        "questions": {
+            "action": {
+                "type": "choice",
+                "instructions": "Choose the action that most directly lowers the room temperature.",
+                "criteria": {
+                    "cool": "Turn on air conditioning",
+                    "light": "Turn on the lights",
+                    "wait": "Keep the current settings",
+                },
+            },
+            "occupied": {
+                "type": "boolean",
+                "instructions": "Someone is home.",
+            },
+            "heat": {
+                "type": "score",
+                "instructions": "Classify how far the room temperature exceeds the target.",
+                "criteria": [
+                    "At or below target",
+                    "Above target by at most 3 degrees",
+                    "Above target by more than 3 degrees",
+                ],
+            },
+        },
+    }]
+}
+
+data = json.dumps(request_body).encode()
+req = urllib.request.Request(
+    "http://127.0.0.1:8765/api/evaluate",
+    data=data,
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req) as resp:
+    result = json.loads(resp.read())
+
+answers = result["states"][0]["answers"]
+print("Action:", answers["action"]["choice"])
+print("Occupied:", answers["occupied"]["value"])
+print("Heat level:", answers["heat"]["level"])
+```
+
+</CodeGroup>
+
+Example response:
+
+```json
+{
+  "schema_version": "openjev-toy-inference-v1",
+  "states": [{
+    "id": "living_room",
+    "answers": {
+      "action": {
+        "type": "choice",
+        "choice": "cool",
+        "value": "cool",
+        "probabilities": {"cool": 0.921, "light": 0.031, "wait": 0.048}
+      },
+      "occupied": {
+        "type": "boolean",
+        "p_true": 0.974,
+        "value": true,
+        "probabilities": {"false": 0.026, "true": 0.974}
+      },
+      "heat": {
+        "type": "score",
+        "score": 1.887,
+        "level": 2,
+        "probabilities": {"0": 0.021, "1": 0.071, "2": 0.908}
+      }
+    }
+  }],
+  "execution": {
+    "states": 1,
+    "questions": 3,
+    "candidate_paths": 5,
+    "forward_passes": 1,
+    "precision": "bf16",
+    "server_evaluation_seconds": 0.043,
+    "network_model_calls": 0,
+    "persistent_model_load_count": 1
+  }
+}
+```
+
+## CLI alternative
+
+To run the same inference without a running service, use `predict_toy_decisions.py` directly. This loads the checkpoint once, runs inference, and writes results to a file (or stdout):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/predict_toy_decisions.py \
+  --checkpoint-dir runs/navigation_run \
+  --input data/request.json \
+  --output artifacts/navigation_run/decisions.json \
+  --batch-questions 0 --precision bf16 --temperature 1
+```
+
+`--batch-questions 0` evaluates all questions in one forward pass. A positive integer batches complete questions into groups of that size. The output format is identical to the HTTP API response, with the addition of `checkpoint` and `temperature` metadata fields.
+
+## Limits
+
+| Resource | Limit |
+|---|---|
+| Max states per request | 32 |
+| Max questions per request | 96 |
+| Max candidate paths per request | 256 |
+| Max request body size | 2,000,000 bytes |
+
+<Note>
+  The request body is capped at 2,000,000 bytes. Requests that include a `Content-Length` header outside the range 1–2,000,000 are rejected with a `400` error before any JSON parsing occurs.
+</Note>
+
+## Error codes
+
+| HTTP status | Meaning |
+|---|---|
+| `400 Bad Request` | Validation error — malformed JSON, invalid question type, missing required field, duplicate state or question ID, non-finite numbers, probabilities that do not sum to 1, candidate counts outside the allowed range, or request body exceeding the 2 MB limit. The `error` field in the response body contains a description. |
+| `404 Not Found` | The request path does not match a known endpoint. |
+| `500 Internal Server Error` | Model inference failed. The server process logs the traceback. The response body contains `{"error": "Local model inference failed; inspect the server process. No teacher fallback was used."}`. |

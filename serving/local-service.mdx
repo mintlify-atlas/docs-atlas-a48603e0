@@ -1,0 +1,108 @@
+---
+title: "Run the NanoJev Local Decision Service"
+sidebarTitle: "Local Service"
+description: "Start a persistent local HTTP service that loads NanoJev once and accepts repeated batched decision requests via POST /api/evaluate."
+---
+
+The local decision service loads the model checkpoint **once** at startup and keeps it resident in GPU memory, accepting repeated batched requests over HTTP without incurring the cost of reloading model weights between calls. This makes it the recommended path for interactive use, browser-based replays, and any workflow that needs to issue many independent inference requests against the same checkpoint.
+
+## Start the service
+
+Run the following command from the repository root (requires a CUDA device):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/serve_decisions.py \
+  --checkpoint-dir runs/navigation_run \
+  --web-root web --host 127.0.0.1 --port 8765 \
+  --precision bf16
+```
+
+When the service is ready it prints a JSON startup line and begins accepting connections:
+
+```json
+{"url": "http://127.0.0.1:8765", "ready": true, "provider_calls": 0}
+```
+
+Open **http://127.0.0.1:8765** in a browser to access the interactive decision lab served from the `web/` directory.
+
+## CLI flags
+
+<ParamField path="--checkpoint-dir" type="string" required>
+  Path to the local checkpoint directory. Must contain:
+  - `best.safetensors` — model weights
+  - `config.json` — training configuration (includes `set_head` and `max_length`)
+  - `tokenizer/` — tokenizer directory
+  - `backbone_config/` — backbone architecture configuration
+</ParamField>
+
+<ParamField path="--web-root" type="string" default="web">
+  Path to the web directory that is served as static files. Must contain `index.html`. Use the `web/` directory from the repository root.
+</ParamField>
+
+<ParamField path="--host" type="string" default="127.0.0.1">
+  Bind address for the HTTP server. The default restricts the service to local connections only.
+</ParamField>
+
+<ParamField path="--port" type="integer" default="8765">
+  TCP port the server listens on.
+</ParamField>
+
+<ParamField path="--precision" type="string" default="bf16">
+  Forward pass precision. Accepted values: `fp32`, `bf16`. `bf16` matches the training and evaluation default and requires a CUDA device that supports BF16. Use `fp32` to disable autocast for numerical reference runs.
+</ParamField>
+
+<ParamField path="--disable-native-triton" type="flag">
+  When present, deregisters PyTorch native-Triton operator overrides before loading the model. Use this flag only when the host requires the original PyTorch native-Triton compatibility fallback. Do not pass this flag unless you have a specific compatibility requirement.
+</ParamField>
+
+## Verify the service
+
+From a second terminal, confirm the service is ready:
+
+```bash
+curl http://127.0.0.1:8765/api/health
+```
+
+Expected response:
+
+```json
+{"ready": true, "model_loaded_once": true, "provider_calls": 0}
+```
+
+`model_loaded_once: true` confirms weights were loaded exactly once. `provider_calls: 0` confirms the service never contacts an external model provider.
+
+## Request limits
+
+Each `POST /api/evaluate` request is validated against the following hard limits before inference begins:
+
+| Resource | Limit |
+|---|---|
+| States per request | 32 |
+| Questions per request | 96 |
+| Candidate paths per request | 256 |
+
+Candidate paths are counted as follows: a **Boolean** question contributes **1** path, a **Choice** question contributes **N** paths (one per candidate), and a **Score** question contributes **K** paths (one per level). Requests that exceed any of these limits receive a `400` error.
+
+## Security note
+
+Cross-origin requests are rejected by the service. When the `Origin` header in a request resolves to a different host than the `Host` header, the server returns a `400` error. The service is intended for local use on `127.0.0.1` only and should not be exposed on a public network interface without additional controls.
+
+## Using the downloaded HuggingFace checkpoint
+
+After downloading the public NanoJev checkpoint to `checkpoints/NanoJev` (see the [model page](https://huggingface.co/C-Tianyu/NanoJev)), start the service directly against that directory:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/serve_decisions.py \
+  --checkpoint-dir checkpoints/NanoJev \
+  --web-root web --host 127.0.0.1 --port 8765 --precision bf16
+```
+
+This is the standard path when using the hosted checkpoint rather than a locally trained run.
+
+<Note>
+  The service logs only the HTTP method, path, and status code for each request. The contents of request states, questions, and answers are never written to any log.
+</Note>
+
+<Warning>
+  The `--web-root` directory must contain `index.html`. If the file is missing the server will refuse to start with a `ValueError`. Always use the `web/` directory from the repository root, or a copy of it, as the web root.
+</Warning>

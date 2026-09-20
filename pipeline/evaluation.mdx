@@ -1,0 +1,144 @@
+---
+title: "Evaluate NanoJev Checkpoint Quality and Game Performance"
+sidebarTitle: "Evaluation"
+description: "Measure probability quality with cross-entropy and Brier scores, run closed-loop navigation benchmarks, and compare NanoJev checkpoints across splits."
+---
+
+NanoJev supports two complementary evaluation modes. **Offline prediction metrics** measure how well the model's output distributions match the programmatic targets saved in `predictions_*.jsonl`, using cross-entropy, Brier scores, ECE, total variation, and KL divergence. **Closed-loop game rollouts** run the model as a live controller inside a navigation or game environment, recording complete trajectories, success rates, and action distributions.
+
+## Offline prediction metrics
+
+The prediction files produced after training contain per-question model outputs alongside their targets. Run the evaluator against any split file:
+
+```bash
+python scripts/evaluate_pipeline_decisions.py \
+  --input runs/navigation_run/predictions_test.jsonl \
+  --output runs/navigation_run/test_metrics.json
+
+python scripts/evaluate_pipeline_decisions.py \
+  --input runs/navigation_run/predictions_ood.jsonl \
+  --output runs/navigation_run/ood_metrics.json
+```
+
+The evaluator groups questions by `(split, family_id, type)` and computes separate metric groups for each target kind:
+
+### Metric groups
+
+**Deterministic accuracy / Brier / ECE** — applies to questions with `gold_probs_kind: deterministic_truth`. Measures top-label accuracy (argmax matches the one-hot target), 10-bin top-label ECE, and expected Brier score. Use these metrics for factual questions that have a single correct answer.
+
+**Known-distribution TV / KL** — applies to questions with `gold_probs_kind: programmatic_conditional_distribution`. Measures total variation distance and KL divergence from the analytically known conditional distribution. ECE is computed as the 10-bin difference between the model's predicted confidence and the known event probability rather than sampled outcome frequency.
+
+**Optimal-action accuracy / probability mass** — applies to questions with `gold_probs_kind: optimal_action_policy`. Measures whether the model's argmax lands on an optimal action (`optimal_action_accuracy`) and the total probability mass assigned to all optimal actions (`optimal_action_mass`). These are policy quality metrics; the Brier score reported for policy targets reflects the policy reference, not event calibration.
+
+The output JSON also reports `deterministic_questions`, `policy_questions`, and `analytic_questions` counts so you can verify which groups are populated by your data. Results are broken down by split and by `family_id / question_type`.
+
+## Navigation benchmark
+
+The closed-loop evaluator runs the trained model as a navigation controller on a fixed set of maps. It takes one initial state from each of 20 reachable test maps (4×4 grids) and 20 reachable OOD maps (6×6 grids), uses independent per-episode RNG, and enforces a horizon of `2 × size²` steps per episode.
+
+```bash
+mkdir -p artifacts/navigation_run
+
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate_navigation_v3.py \
+  --data-dir data/navigation \
+  --checkpoint-dir runs/navigation_run \
+  --policy greedy --representation coords --precision bf16 \
+  --seed 20260917 --per-split 20 \
+  --name navigation_run_greedy \
+  --output artifacts/navigation_run/greedy.json
+
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate_navigation_v3.py \
+  --data-dir data/navigation \
+  --checkpoint-dir runs/navigation_run \
+  --policy sample --representation coords --precision bf16 \
+  --seed 20260917 --per-split 20 \
+  --name navigation_run_sample \
+  --output artifacts/navigation_run/sample.json
+```
+
+### Policy options
+
+| `--policy` | Description |
+|---|---|
+| `greedy` | Always selects the candidate with the highest model probability |
+| `sample` | Samples the next action from the model's T=1 output distribution |
+| `random` | Uniform random action selection; runs without a checkpoint |
+| `oracle` | BFS optimal action controller; runs without a checkpoint |
+
+<Note>
+  `--policy random` and `--policy oracle` run the corresponding environment controllers without loading a checkpoint. Use these as baselines without a GPU.
+</Note>
+
+### Representation options
+
+| `--representation` | Description |
+|---|---|
+| `coords` | Explicit (row, column) coordinates for agent, goal, and walls; indexed full grid; legal destination coordinates per candidate action |
+| `ascii` | Grid map with `A`=agent, `G`=goal, `#`=wall, `.`=open, without explicit coordinate annotations |
+
+Use the same representation at evaluation that was used during training. A model trained on `coords_multi.jsonl` should be evaluated with `--representation coords`.
+
+### Benchmark results
+
+The 40-map navigation benchmark uses T=1 probability sampling. Results on 4×4 test maps and 6×6 OOD maps:
+
+| System | 4×4 test (20 maps) | 6×6 OOD (20 maps) |
+|---|---|---|
+| **NanoJev** | **19/20 — 95%** | **18/20 — 90%** |
+| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 20/20 — 100% | 19/20 — 95% |
+| Untuned Qwen3-0.6B | 7/20 — 35% | 3/20 — 15% |
+
+### Evaluation outputs
+
+Each output JSON records complete trajectories, per-episode success flags, path efficiency, repeated-visit counts, per-step action probabilities, and a count of single-legal-action forced moves (states where the controller executes a move directly because only one legal action exists and the Choice API requires at least two candidates).
+
+<Tip>
+  Use map-separated data — keeping different maps in train vs test — to measure true generalization rather than route memorization. The navigation generator enforces this by excluding every V2 source map group from the V3 splits using `--v2-input`.
+</Tip>
+
+## Game evaluation
+
+For maze and Snake game performance, use the dedicated game evaluators after generating scaled-game data:
+
+```bash
+python scripts/evaluate_composed_maze.py \
+  --checkpoint-dir runs/navigation_run \
+  --data-dir data/games \
+  --output artifacts/maze_results.json
+
+python scripts/evaluate_composed_snake.py \
+  --checkpoint-dir runs/navigation_run \
+  --data-dir data/games \
+  --output artifacts/snake_results.json
+```
+
+These evaluators run closed-loop episodes on maze and Snake environments respectively, recording food collected, steps taken, collision counts, and final outcomes.
+
+## Native Qwen baseline
+
+Compare against the untuned Qwen3-0.6B backbone using the native option-token interface:
+
+```bash
+python scripts/evaluate_native_qwen_maze.py \
+  --data-dir data/navigation \
+  --output artifacts/native_qwen_maze.json \
+  --per-split 20 --seed 20260917
+
+python scripts/evaluate_native_qwen_navigation.py \
+  --data-dir data/navigation \
+  --output artifacts/native_qwen_navigation.json \
+  --per-split 20 --seed 20260917
+```
+
+These scripts use the original pretrained weights and the language-model head conditioned on offered A–D answer tokens, without any fine-tuning. The results correspond to the "Untuned Qwen3-0.6B" rows in the benchmark tables above.
+
+## Local safety model accuracy
+
+For the scaled-game local safety model (50×50 questions trained with matched 5×5 observations), accuracy on held-out splits:
+
+| Split | Questions | Accuracy |
+|---|---|---|
+| Test | — | 77.84% |
+| OOD (50×50) | — | 76.56% |
+
+These results are for the atomic Boolean safety questions (whether a geometric move stays in bounds and avoids a wall), not the navigation routing task. Report atomic question accuracy, event probability recovery, and planning success as separate measurements rather than pooling them.

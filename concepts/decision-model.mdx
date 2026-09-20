@@ -1,0 +1,161 @@
+---
+title: "How NanoJev's Decision Model Works"
+sidebarTitle: "Decision Model"
+description: "Understand the state-question-candidate architecture that lets NanoJev return complete probability distributions without autoregressive token generation."
+---
+
+NanoJev inverts the conventional language-model workflow. Rather than prompting a model to generate text and then parsing the output, NanoJev evaluates structured questions about a shared state and returns a complete probability distribution over every candidate in a single forward pass. There is no output-token decoding, no sampling loop, and no post-processing step to extract a label from generated text.
+
+## State
+
+A **state** is the shared evaluation context for a group of related questions. It can be a plain text string, a JSON object, or a JSON array. All evidence relevant to a set of questions belongs in one state; the model reads the entire state before scoring any candidate.
+
+```json
+"state": "The living room is 29 degrees. The target is 24 degrees. The window is closed and someone is home."
+```
+
+A state can also be structured data:
+
+```json
+"state": {"room": "living_room", "temp_c": 29, "target_c": 24, "occupied": true}
+```
+
+Or a list of observations:
+
+```json
+"state": ["3 red tokens", "1 blue token", "draw not yet observed"]
+```
+
+Related maps, rule descriptions, and their variations belong together in a single state. The state is shared across every question in the same record — the model reads it once and reuses it for all questions in that group.
+
+## Question
+
+A **question** is a triple: a state, an instruction, and a candidate set. The question uniquely describes what is being decided. Its instruction must be self-contained — it carries the complete semantic content of the question into the model.
+
+```json
+"action": {
+  "type": "choice",
+  "instructions": "Choose the action that most directly lowers the room temperature.",
+  "criteria": {
+    "cool": "Turn on air conditioning",
+    "light": "Turn on the lights",
+    "wait": "Keep the current settings"
+  }
+}
+```
+
+Question IDs (like `"action"` above) identify responses in the output and are completely absent from the model's input. Renaming a question ID does not change any candidate path — the model never sees the key. Instructions must therefore contain the complete question; a descriptive ID is not a substitute for a well-formed instruction.
+
+Multiple questions can share a state. Questions are **independent**: the answer to one does not become input to another. If a downstream decision requires the result of a prior question, that result must be incorporated into a new state in a subsequent request.
+
+## Candidate Paths
+
+Each decision is defined by a state, a question, and its candidate set. Every candidate path carries the relevant input into the backbone.
+
+For a **Choice** question with three options, NanoJev constructs three independent leaf sequences, one per candidate. Each leaf contains:
+
+1. The full state text.
+2. The question type and instruction.
+3. A single candidate: `Candidate:\n{key}: {description}\nDecision:` followed by the EOS token.
+
+For a **Boolean** question, there is exactly one candidate path. The leaf text encodes the proposition's `true` criterion as `"The proposition is true."` The backbone produces scores for the single path and passes them through a sigmoid to yield `p_true` and `p_false`.
+
+For a **Score** question with K ordered levels, NanoJev constructs K independent leaf sequences, one per level description. Each leaf contains only its own description with no injected index or adjacent level information.
+
+Every leaf is encoded independently. The state and instruction prefix is shared by construction but is not computed with prefix caching — each leaf is a complete, padded sequence in the batch.
+
+## Decision Heads
+
+After the backbone produces a hidden state at the final token position of each leaf, specialized **decision heads** convert those hidden states into a probability distribution:
+
+- **Choice**: A shared scalar head scores each candidate. An optional set-attention mechanism combines candidate representations within the same question before the final softmax, allowing the model to consider the relative plausibility of all candidates together.
+- **Boolean**: A single-path sigmoid maps the leaf's scalar score to `p_true`. Because Boolean contributes exactly one candidate path, there is no set-attention step.
+- **Score**: Each level description is scored independently by the scalar head. Set attention is not used for Score; the model evaluates each ordered level on its own. The final distribution is a softmax over K independent scores, and the expected score is the probability-weighted level index: `score = Σ(i · p_i)`.
+
+## Parallel Batching
+
+Multiple states and multiple questions are evaluated together in a single backbone forward. When a batch contains several states with their respective question sets, all candidate paths from all questions across all states are padded and processed in one matrix multiplication.
+
+A measured example from a running service:
+
+> **6 states · 18 questions · 44 candidate paths · 1 backbone forward**
+
+This means the backbone ran exactly once to answer 18 structurally independent questions spread across 6 different states. The path count (44) reflects the sum of all candidates: one per Boolean path, N per Choice question, K per Score question.
+
+## Inference Record Structure
+
+A single inference request contains a list of states. Each state carries its ID, content, and the complete set of questions to evaluate against it:
+
+```json
+{
+  "states": [
+    {
+      "id": "living_room",
+      "state": "The living room is 29 degrees. The target is 24 degrees. The window is closed and someone is home.",
+      "questions": {
+        "action": {
+          "type": "choice",
+          "instructions": "Choose the action that most directly lowers the room temperature.",
+          "criteria": {
+            "cool": "Turn on air conditioning",
+            "light": "Turn on the lights",
+            "wait": "Keep the current settings"
+          }
+        },
+        "occupied": {
+          "type": "boolean",
+          "instructions": "Someone is home."
+        },
+        "heat": {
+          "type": "score",
+          "instructions": "Classify how far the room temperature exceeds the target.",
+          "criteria": [
+            "At or below target",
+            "Above target by at most 3 degrees",
+            "Above target by more than 3 degrees"
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+## Training Record Structure
+
+A training record extends the inference record with target distributions and metadata. The `gold_probs` field holds the target probability for every candidate in every question. The `state`, `questions`, and `gold_probs` together define one complete supervised example:
+
+```json
+{
+  "id": "bag_001",
+  "state_id": "bag_001",
+  "family_id": "known_bag_probability",
+  "split": "train",
+  "state": "A token is drawn uniformly from a bag containing three red tokens and one blue token. The draw has not been observed.",
+  "questions": {
+    "color": {
+      "type": "choice",
+      "instructions": "What is the probability distribution of the drawn token's color?",
+      "criteria": {"red": "The token is red", "blue": "The token is blue"}
+    },
+    "is_red": {
+      "type": "boolean",
+      "instructions": "The drawn token is red."
+    }
+  },
+  "gold_probs": {
+    "color": {"red": 0.75, "blue": 0.25},
+    "is_red": {"false": 0.25, "true": 0.75}
+  }
+}
+```
+
+`id` identifies the record, `state_id` identifies its physical or semantic context, and `family_id` groups related variations into the same train/dev/test split. The target distribution fields (`gold_probs`, `gold_probs_kind`, `gold`) live outside the inference input and are not seen by the model during prediction.
+
+## Independence
+
+Questions share a state but do not consume each other's answers. The forward pass has no cross-question attention: each leaf sequence contains exactly one state, one instruction, and its own candidate. Unrelated questions and unrelated states do not change each other's candidate tokens. If one decision depends on the outcome of another, the result must be folded into a new state in a follow-up request.
+
+<Note>
+  **TypeSafe Jev compatibility:** NanoJev uses `type: "boolean"` in both its training records and inference API. The direct TypeSafe Jev API uses `type: "noul"` and returns a field named `noul` for the true-probability. A compatibility adapter must explicitly map these names and response fields. Local `type: "noul"` currently fails NanoJev's schema validation.
+</Note>

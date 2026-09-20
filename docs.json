@@ -1,72 +1,76 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "NanoJev",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#6078a3",
+    "light": "#eff4ea",
+    "dark": "#0c0c0c"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
+  "favicon": "https://media.brand.dev/9b969115-8687-4e89-b7e8-0d48537fae46.png",
   "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "light": "https://media.brand.dev/903f86a8-6116-4252-bc76-107f99b38cb0.svg",
+    "dark": "https://media.brand.dev/903f86a8-6116-4252-bc76-107f99b38cb0.svg"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/TianyuCodings/NanoJev"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/TianyuCodings/NanoJev"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/decision-model",
+              "concepts/question-types",
+              "concepts/parallel-decisions"
+            ]
+          },
+          {
+            "group": "Training Pipeline",
+            "pages": [
+              "pipeline/overview",
+              "pipeline/dataset-format",
+              "pipeline/training",
+              "pipeline/evaluation"
+            ]
+          },
+          {
+            "group": "Serving & Inference",
+            "pages": [
+              "serving/local-service",
+              "serving/inference-api",
+              "serving/game-replay"
+            ]
+          },
+          {
+            "group": "Experiments & Results",
+            "pages": [
+              "experiments/game-benchmarks",
+              "experiments/rlcd",
+              "experiments/model-checkpoints"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

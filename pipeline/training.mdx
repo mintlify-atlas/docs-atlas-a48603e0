@@ -1,0 +1,250 @@
+---
+title: "Train a NanoJev Decision Model from Scratch"
+sidebarTitle: "Training"
+description: "Generate programmatic datasets, fine-tune Qwen3-0.6B with distribution losses, extend with navigation data, and continue from a downloaded checkpoint."
+---
+
+This page covers the complete NanoJev training workflow: generating the programmatic base dataset, running the base training command on Qwen3-0.6B, extending the model with navigation data using multiple grid-representation views, and continuing from the publicly released HuggingFace checkpoint. Every path is relative to the repository root. Use a new output directory for each new run.
+
+## Generate the dataset
+
+Build support decisions, workflow tasks, and game states from their respective generators:
+
+```bash
+python scripts/build_toy_decisions.py \
+  --output-dir data/support --seed 17
+
+python scripts/build_workflow_decisions.py \
+  --output-dir data/workflows --seed 20260917
+
+python scripts/build_game_decisions.py \
+  --output-dir data/games --seed 17
+```
+
+Each generator writes per-split JSONL files. Combine the support and workflow splits in their fixed order and create the empty overlay file required by the assembler:
+
+```python
+from pathlib import Path
+
+splits = ("train", "dev", "calibration", "test", "ood")
+for name in ("support", "workflows"):
+    directory = Path("data") / name
+    text = "".join((directory / f"{split}.jsonl").read_text() for split in splits)
+    (directory / "all.jsonl").write_text(text)
+Path("data/empty_overlay.jsonl").write_text("")
+```
+
+Run the assembler to merge all sources, check state and source-group separation, and write `merged.jsonl`:
+
+```bash
+python scripts/assemble_pipeline_dataset.py \
+  --workflows data/workflows/all.jsonl \
+  --games-raw data/games/all.jsonl \
+  --games-labels data/empty_overlay.jsonl \
+  --toy data/support/all.jsonl \
+  --output-dir data/base_dataset --freeze
+```
+
+The default generators produce **2,312 states and 6,936 questions**. `--freeze` writes the assembled dataset; omitting it performs only a source-data check. Validate the result before loading a model:
+
+```bash
+python scripts/train_pipeline_decisions.py \
+  --input data/base_dataset/merged.jsonl --validate-only
+```
+
+## Train the base model
+
+Cache the fixed Qwen3-0.6B revision before the first training run:
+
+```python
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="Qwen/Qwen3-0.6B",
+    revision="c1899de289a04d12100db370d81485cdf75e47ca",
+)
+```
+
+Then launch training:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_pipeline_decisions.py \
+  --input data/base_dataset/merged.jsonl \
+  --output-dir runs/base_run \
+  --model Qwen/Qwen3-0.6B \
+  --revision c1899de289a04d12100db370d81485cdf75e47ca \
+  --objective gold_distribution --set-head attention \
+  --seed 17 --head-steps 12 --steps 600 \
+  --batch-questions 12 --microbatch-questions 4 \
+  --max-microbatch-tokens 6000 --max-length 512 \
+  --eval-every 50 --precision bf16 \
+  --backbone-lr 2e-5 --head-lr 2e-4 --head-warmup-lr 1e-3
+```
+
+### Flag reference
+
+| Flag | Value | Description |
+|---|---|---|
+| `--objective gold_distribution` | — | Use distribution cross-entropy loss against `gold_probs` targets |
+| `--set-head attention` | — | Choice uses shared scalar head with set attention |
+| `--head-steps 12` | `12` | 12 head-only warmup updates before full fine-tuning begins |
+| `--steps 600` | `600` | 600 full-model optimizer updates after warmup |
+| `--batch-questions 12` | `12` | Effective batch of 12 complete questions per update |
+| `--microbatch-questions 4` | `4` | At most 4 questions per microbatch; gradients accumulate |
+| `--max-microbatch-tokens 6000` | `6000` | Padded candidate-token budget per microbatch |
+| `--precision bf16` | `bf16` | BF16 forward pass with `torch.autocast` |
+| `--backbone-lr 2e-5` | `2e-5` | Learning rate for backbone parameters during full training |
+| `--head-lr 2e-4` | `2e-4` | Learning rate for decision-head parameters during full training |
+| `--head-warmup-lr 1e-3` | `1e-3` | Head learning rate during the head-only warmup phase |
+
+<Note>
+  The trainer selects the checkpoint with the lowest dev target cross-entropy. The test split is evaluated only after checkpoint selection. Checkpoint selection uses `--eval-every` evaluations on the dev split during the full-model training phase; head-only warmup steps are not evaluated.
+</Note>
+
+## Loss function
+
+For each complete question, the model computes a per-candidate softmax and applies cross-entropy against the target distribution `q`:
+
+```
+p = softmax(z)
+L = -sum_i q_i * log(p_i)
+dL/dz_i = p_i - q_i
+```
+
+Every question has equal loss weight. The entire candidate set for a question shares one normalization denominator. Padded candidate logits never enter the loss computation. Microbatches accumulate gradients for one optimizer update; the effective batch size is `--batch-questions` regardless of how microbatches are split. Increase `--max-microbatch-tokens` when a complete question requires more space; the trainer will raise an explicit error rather than silently truncating candidates.
+
+## Training artifacts
+
+Results for each run are saved under the specified `--output-dir`:
+
+| Artifact | Contents |
+|---|---|
+| `best.safetensors` | Selected model parameters from the best dev checkpoint |
+| `config.json` | Model, revision, training arguments, and environment information |
+| `tokenizer/` | Tokenizer files needed to load the checkpoint locally |
+| `backbone_config/` | Backbone configuration files needed to load the checkpoint locally |
+| `train_log.json` | Per-step losses and dev evaluation results |
+| `summary.json` | Selected step, split metrics, timing, and GPU memory statistics |
+| `predictions_dev.jsonl` | Predictions and targets for the dev split |
+| `predictions_calibration.jsonl` | Predictions and targets for the calibration split (if present) |
+| `predictions_test.jsonl` | Predictions and targets for the test split |
+| `predictions_ood.jsonl` | Predictions and targets for the OOD split (if present) |
+
+## Navigation extension
+
+Generate the navigation dataset, excluding every source map already present in the earlier game dataset:
+
+```bash
+python scripts/build_navigation_v3.py \
+  --v2-input data/games/all.jsonl \
+  --output-dir data/navigation --seed 20260918
+```
+
+The default navigation generator creates **500 maps, 3,000 states, and 9,000 questions**. Training covers 300 maps with eight exposure slots per map (covering all D4 transforms). Each view also adds the 984 non-navigation training records from the base dataset.
+
+Assemble the four grid-representation views:
+
+```bash
+python scripts/assemble_navigation_v3_views.py \
+  --canonical data/navigation/all.jsonl \
+  --labels data/navigation/all.jsonl \
+  --replay data/base_dataset/merged.jsonl \
+  --output-dir data/navigation_views --seed 17
+```
+
+<CodeGroup>
+```text coords_multi
+The coordinates view. Provides explicit zero-based (row, column) agent and goal coordinates,
+wall coordinate list, a full indexed grid, and legal one-step destination coordinates
+for each candidate action. Use with --representation coords in evaluation.
+```
+
+```text ascii_multi
+The ASCII view. Presents the grid map (A=agent, G=goal, #=wall, .=open) without
+explicit coordinate annotations. Multiple starts per map. Use with --representation ascii.
+```
+
+```text coords_single
+Coordinates representation with a single starting position per map rather than
+all eight D4 transform variants.
+```
+
+```text ascii_single
+ASCII representation with a single starting position per map.
+```
+</CodeGroup>
+
+Continue training from the base checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_pipeline_decisions.py \
+  --input data/navigation_views/coords_multi.jsonl \
+  --init-checkpoint runs/base_run \
+  --output-dir runs/navigation_run \
+  --model Qwen/Qwen3-0.6B \
+  --revision c1899de289a04d12100db370d81485cdf75e47ca \
+  --objective gold_distribution \
+  --seed 17 --head-steps 0 --steps 1200 \
+  --batch-questions 12 --microbatch-questions 4 \
+  --max-microbatch-tokens 6000 --max-length 512 \
+  --eval-every 50 --precision bf16 \
+  --backbone-lr 2e-5 --head-lr 2e-4
+```
+
+Use `--head-steps 0` when continuing from a checkpoint because the decision head is already initialized. Use the same representation (`coords` or `ascii`) when evaluating a checkpoint that was trained on a particular view.
+
+<Warning>
+  `--init-checkpoint` loads the exact model directory including its decision-head configuration. It starts a **new optimizer** — this is not an exact resume of a previous training run. The architecture (in particular `set_head`) cannot be changed during a warm start. Replace `runs/base_run` with any compatible checkpoint directory and give each new run its own `--output-dir`.
+</Warning>
+
+## Continue from the HuggingFace checkpoint
+
+Download the released NanoJev model and dataset, then start a new continuation run with a fresh optimizer:
+
+```python
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="C-Tianyu/NanoJev",
+    local_dir="checkpoints/NanoJev",
+    allow_patterns=[
+        "best.safetensors",
+        "config.json",
+        "tokenizer/*",
+        "backbone_config/*",
+    ],
+)
+snapshot_download(
+    repo_id="C-Tianyu/NanoJev-Data",
+    repo_type="dataset",
+    local_dir="data/NanoJev",
+)
+```
+
+Validate the downloaded data:
+
+```bash
+python scripts/train_pipeline_decisions.py \
+  --input data/NanoJev/stage1/all.jsonl --validate-only
+python scripts/train_pipeline_decisions.py \
+  --input data/NanoJev/stage2/all.jsonl --validate-only
+```
+
+Start a continuation run from the released checkpoint using the prepared stage 2 targets:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_pipeline_decisions.py \
+  --input data/NanoJev/stage2/all.jsonl \
+  --init-checkpoint checkpoints/NanoJev \
+  --output-dir runs/nanojev_continued \
+  --model Qwen/Qwen3-0.6B \
+  --revision c1899de289a04d12100db370d81485cdf75e47ca \
+  --objective gold_distribution \
+  --seed 17 --head-steps 0 --steps 300 \
+  --batch-questions 12 --microbatch-questions 4 \
+  --max-microbatch-tokens 6000 --max-length 512 \
+  --eval-every 50 --precision bf16 \
+  --backbone-lr 2e-5 --head-lr 2e-4
+```
+
+Use `data/NanoJev/stage1/all.jsonl` as the input when starting a new base run from scratch instead. The resulting run directories work with the same prediction and serving commands described in the [Evaluation](/pipeline/evaluation) and [Serving](/serving/local-service) pages.
