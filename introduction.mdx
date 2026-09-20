@@ -1,7 +1,7 @@
 ---
-title: "NanoJev: Parallel Decisions with Complete Probability Distributions"
+title: "NanoJev: Complete Probability Distributions, One Pass"
 sidebarTitle: "Introduction"
-description: "NanoJev is a 0.6B decision model that replaces autoregressive generation with structured decision heads, returning full probability distributions in a single forward pass."
+description: "NanoJev is a 0.6B parallel decision model built on Qwen3-0.6B that returns complete probability distributions in a single forward pass — no token decoding."
 ---
 
 NanoJev is a 0.6B parallel decision model built on Qwen3-0.6B — a nano replica of [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) by TypeSafe. Where standard language models generate output tokens one at a time, NanoJev replaces that entire decoding loop with structured **decision heads** attached to the backbone. You provide a state description and a set of questions; the model returns a complete probability distribution over every candidate in a single forward pass — no sampling, no beam search, no token-by-token decoding.

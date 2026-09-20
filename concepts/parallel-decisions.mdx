@@ -76,7 +76,7 @@ The `predict_toy_decisions.py` script controls how candidate paths are grouped f
 - `--batch-questions 0` *(default)* — Evaluates all questions in the request in **one forward pass**. This is the fully parallel mode.
 - `--batch-questions N` *(positive integer)* — Groups complete questions into batches of at most N questions and runs each group as a separate forward pass.
 
-For large requests, `--max-microbatch-tokens` sets a padded-token limit per microbatch during training. Increase this value when a single question's candidate paths require more space than the default allows:
+The `--max-length` flag overrides the per-token limit per candidate path. Increase this when a single question's candidate paths exceed the checkpoint's default length:
 
 ```bash
 python scripts/predict_toy_decisions.py \
@@ -84,7 +84,7 @@ python scripts/predict_toy_decisions.py \
   --input data/request.json \
   --output artifacts/decisions.json \
   --batch-questions 0 \
-  --max-microbatch-tokens 6000 \
+  --max-length 512 \
   --precision bf16
 ```
 

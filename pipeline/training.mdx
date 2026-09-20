@@ -1,5 +1,5 @@
 ---
-title: "Train a NanoJev Decision Model from Scratch"
+title: "Train a NanoJev Decision Model End to End from Scratch"
 sidebarTitle: "Training"
 description: "Generate programmatic datasets, fine-tune Qwen3-0.6B with distribution losses, extend with navigation data, and continue from a downloaded checkpoint."
 ---
@@ -105,7 +105,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/train_pipeline_decisions.py \
 
 For each complete question, the model computes a per-candidate softmax and applies cross-entropy against the target distribution `q`:
 
-```
+```text
 p = softmax(z)
 L = -sum_i q_i * log(p_i)
 dL/dz_i = p_i - q_i

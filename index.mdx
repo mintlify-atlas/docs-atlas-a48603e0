@@ -1,7 +1,7 @@
 ---
 title: "NanoJev: Parallel Decision Model with Zero Output Decoding"
 sidebarTitle: "Home"
-description: "NanoJev is a 0.6B decision model that returns complete probability distributions over choices, booleans, and scores in a single forward pass — no token-by-token generation required."
+description: "NanoJev is a 0.6B decision model that returns probability distributions over choices, booleans, and scores in a single forward pass with zero decoding."
 ---
 
 NanoJev is a nano replica of [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) — a 0.6B decision model built on Qwen3-0.6B. Feed it a state and a set of questions and it returns a complete probability distribution over every candidate in a single forward pass. No output-token decoding, no generation loop. Batch multiple independent states and questions together and they all resolve in one backbone forward.
